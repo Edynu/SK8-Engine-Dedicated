@@ -1166,6 +1166,15 @@ REXCVAR_DECLARE(bool, readback_resolve_half_pixel_offset);
 // synchronous during menu contexts by YieldForMenus so one-shot portrait
 // renders can't lose still-compiling pieces (first-run armless skaters).
 REXCVAR_DECLARE(bool, async_shader_compilation);
+REXCVAR_DEFINE_BOOL(
+    skate3_multiplayer_pin_unused_bones, true, "Skate 3/Multiplayer",
+    "Pin canonical bones no receiver reads to a constant so the delta mask "
+    "stops resending them every frame. The list is measured on the RECEIVER "
+    "(multiplayer-consumed-bones) because the sender cannot see bones used "
+    "only by bind-skinned ROPA cloth. Disable if a remote player's face or "
+    "hair looks wrong with an outfit this was not measured against.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(skate3_native_render_scene_perf_log, false, "Skate 3",
                     "Log periodic native-renderer performance breakdown lines "
                     "(see skate3_native_render_scene_perf_interval)")
@@ -2727,6 +2736,89 @@ void SetVanillaUiBackdrop(bool enabled) {
     g_post_blur_log_count.store(0, std::memory_order_relaxed);
     rex::graphics::RequestNativeGuestOutputPostProcess(true);
   }
+}
+
+void SetDevConsoleVisible(bool visible) {
+  g_dev_console_visible.store(visible, std::memory_order_relaxed);
+  if (visible) {
+    // Keep the emulated-output post-processor armed while the console is
+    // open; PostProcessGuestOutput re-requests this every frame it draws,
+    // same as SetSettingsMenuBlur/SetVanillaUiBackdrop above.
+    rex::graphics::RequestNativeGuestOutputPostProcess(true);
+  }
+}
+
+void GetLastDevConsoleGuestOutputSize(uint32_t& out_width, uint32_t& out_height) {
+  out_width = g_dev_console_guest_output_w.load(std::memory_order_relaxed);
+  out_height = g_dev_console_guest_output_h.load(std::memory_order_relaxed);
+}
+
+void SetNuiVisible(bool visible) {
+  const bool was_visible =
+      g_nui_visible.exchange(visible, std::memory_order_relaxed);
+  if (visible && !was_visible) {
+    // Arms the emulated-output post-processor the same way the console and
+    // the menu blurs do. PostProcessGuestOutput re-arms it every frame it
+    // actually draws NUI, so this only has to cover the transition.
+    rex::graphics::RequestNativeGuestOutputPostProcess(true);
+  }
+}
+
+void GetLastNuiGuestOutputSize(uint32_t& out_width, uint32_t& out_height) {
+  out_width = g_nui_guest_output_w.load(std::memory_order_relaxed);
+  out_height = g_nui_guest_output_h.load(std::memory_order_relaxed);
+}
+
+bool WorldToScreen(const float world[3], float& out_x, float& out_y,
+                   float& out_depth) {
+  std::shared_ptr<const FrameScene> scene;
+  {
+    std::lock_guard<std::mutex> lock(g_scene_mutex);
+    scene = g_scene;
+  }
+  if (!scene) {
+    return false;
+  }
+  // Row-vector convention: clip[col] = sum_row point[row] * vp[row*4+col],
+  // matching how the raytraced-mirror placement projects its corners.
+  const float point[4] = {world[0], world[1], world[2], 1.0f};
+  float clip[4] = {};
+  for (int column = 0; column < 4; ++column) {
+    for (int row = 0; row < 4; ++row) {
+      clip[column] += point[row] * scene->view_proj[row * 4 + column];
+    }
+  }
+  // Behind the camera (or exactly on the plane): dividing by w would fold
+  // the point back onto the screen mirrored, which reads as a marker
+  // hovering in front of a player who has skated past it.
+  if (!(clip[3] > 1e-4f)) {
+    return false;
+  }
+  const float ndc_x = clip[0] / clip[3];
+  const float ndc_y = clip[1] / clip[3];
+  if (!std::isfinite(ndc_x) || !std::isfinite(ndc_y)) {
+    return false;
+  }
+  out_x = ndc_x * 0.5f + 0.5f;
+  // NDC y is +1 at the top; screen fractions are measured downward.
+  out_y = 0.5f - ndc_y * 0.5f;
+  out_depth = clip[3];
+  return true;
+}
+
+bool CameraPosition(float out_position[3]) {
+  std::shared_ptr<const FrameScene> scene;
+  {
+    std::lock_guard<std::mutex> lock(g_scene_mutex);
+    scene = g_scene;
+  }
+  if (!scene) {
+    return false;
+  }
+  out_position[0] = scene->cam_pos[0];
+  out_position[1] = scene->cam_pos[1];
+  out_position[2] = scene->cam_pos[2];
+  return true;
 }
 
 void FlushTextureCache() { g_flush_textures.store(true, std::memory_order_relaxed); }
@@ -6483,6 +6575,215 @@ bool FreecamGuestPose(float out_pos[3]) {
   return true;
 }
 
+// --- Scripted camera (Lua) ------------------------------------------------
+//
+// Reuses the freecam's per-frame composition almost verbatim: recover
+// yaw/pitch from a forward vector, build right/up/forward from them with
+// the same sign-corrected trig, and hand the result to the SAME guest
+// -camera-override channel (g_freecam_guest_view/pos/active). The only real
+// difference is where the forward vector comes from - the freecam derives
+// it from WASD/mouse deltas frame to frame; this derives it once per frame
+// from (target - position), so "look at" is exact rather than approached.
+//
+// SIGN RESOLUTION is still needed and still one-time-per-engagement: it
+// answers "does cross(worldUp, forward) point the same way this engine's
+// actual right column does", which is a property of the engine's own
+// view/projection convention, not of any particular camera direction - so
+// resolving it once against whatever the guest's own camera happens to be
+// at the moment of engagement is exactly as valid as resolving it against
+// our own forward would be, and the guest camera is what is actually
+// available at that moment.
+struct ScriptCamObject {
+  bool alive = false;
+  double pos[3] = {0.0, 0.0, 0.0};
+  double target[3] = {0.0, 0.0, 1.0};
+  bool has_target = false;
+};
+std::mutex g_scriptcam_mutex;
+std::vector<ScriptCamObject> g_scriptcam_objects;  // handle = index + 1
+int g_scriptcam_active_handle = 0;                 // 0 = none
+
+struct ScriptCamRenderState {
+  bool engaged = false;
+  float proj0[16] = {};
+  float sign_right = 1.0f, sign_up = 1.0f;
+};
+ScriptCamRenderState g_scriptcam_render;
+
+int ScriptCamCreate() {
+  std::lock_guard<std::mutex> lock(g_scriptcam_mutex);
+  for (std::size_t i = 0; i < g_scriptcam_objects.size(); ++i) {
+    if (!g_scriptcam_objects[i].alive) {
+      g_scriptcam_objects[i] = ScriptCamObject{};
+      g_scriptcam_objects[i].alive = true;
+      return static_cast<int>(i) + 1;
+    }
+  }
+  g_scriptcam_objects.push_back(ScriptCamObject{});
+  g_scriptcam_objects.back().alive = true;
+  return static_cast<int>(g_scriptcam_objects.size());
+}
+
+void ScriptCamDestroy(int handle) {
+  std::lock_guard<std::mutex> lock(g_scriptcam_mutex);
+  if (handle <= 0 || handle > static_cast<int>(g_scriptcam_objects.size())) {
+    return;
+  }
+  g_scriptcam_objects[handle - 1].alive = false;
+  if (g_scriptcam_active_handle == handle) {
+    g_scriptcam_active_handle = 0;  // engine restores the guest camera next frame
+  }
+}
+
+bool ScriptCamSetCoord(int handle, float x, float y, float z) {
+  std::lock_guard<std::mutex> lock(g_scriptcam_mutex);
+  if (handle <= 0 || handle > static_cast<int>(g_scriptcam_objects.size()) ||
+      !g_scriptcam_objects[handle - 1].alive) {
+    return false;
+  }
+  ScriptCamObject& cam = g_scriptcam_objects[handle - 1];
+  cam.pos[0] = x;
+  cam.pos[1] = y;
+  cam.pos[2] = z;
+  return true;
+}
+
+bool ScriptCamPointAtCoord(int handle, float x, float y, float z) {
+  std::lock_guard<std::mutex> lock(g_scriptcam_mutex);
+  if (handle <= 0 || handle > static_cast<int>(g_scriptcam_objects.size()) ||
+      !g_scriptcam_objects[handle - 1].alive) {
+    return false;
+  }
+  ScriptCamObject& cam = g_scriptcam_objects[handle - 1];
+  cam.target[0] = x;
+  cam.target[1] = y;
+  cam.target[2] = z;
+  cam.has_target = true;
+  return true;
+}
+
+bool ScriptCamSetActive(int handle, bool active) {
+  std::lock_guard<std::mutex> lock(g_scriptcam_mutex);
+  if (active) {
+    if (handle <= 0 || handle > static_cast<int>(g_scriptcam_objects.size()) ||
+        !g_scriptcam_objects[handle - 1].alive) {
+      return false;
+    }
+    g_scriptcam_active_handle = handle;
+  } else if (g_scriptcam_active_handle == handle) {
+    g_scriptcam_active_handle = 0;
+  }
+  return true;
+}
+
+bool ScriptCamIsActive(int handle) {
+  std::lock_guard<std::mutex> lock(g_scriptcam_mutex);
+  return handle > 0 && g_scriptcam_active_handle == handle;
+}
+
+int ScriptCamGetActive() {
+  std::lock_guard<std::mutex> lock(g_scriptcam_mutex);
+  return g_scriptcam_active_handle;
+}
+
+// Guest render thread only, mirroring UpdateFreecam's own contract. Called
+// only when the freecam did NOT engage this frame (they share one guest
+// -override channel and must never both write it the same frame); with the
+// freecam's keybind removed that condition is always true in practice, but
+// the ordering is kept explicit rather than relying on that.
+bool UpdateScriptCam(FrameScene& scene, const float cam_view[16], double now) {
+  (void)now;
+  ScriptCamRenderState& render = g_scriptcam_render;
+  std::lock_guard<std::mutex> lock(g_scriptcam_mutex);
+  const bool have_active =
+      g_scriptcam_active_handle > 0 &&
+      g_scriptcam_active_handle <= static_cast<int>(g_scriptcam_objects.size()) &&
+      g_scriptcam_objects[g_scriptcam_active_handle - 1].alive;
+  if (!have_active) {
+    if (render.engaged) {
+      render.engaged = false;
+      g_freecam_guest_active.store(0, std::memory_order_release);
+      REXLOG_INFO("native-scene script-cam: off (guest camera restored)");
+    }
+    return false;
+  }
+  const ScriptCamObject& cam = g_scriptcam_objects[g_scriptcam_active_handle - 1];
+
+  if (!render.engaged) {
+    // Same sign-resolution as the freecam's own engage step (see this
+    // function's comment for why using the AMBIENT guest camera here is
+    // correct regardless of which direction our own camera faces).
+    const float f0[3] = {cam_view[2], cam_view[6], cam_view[10]};
+    render.sign_right =
+        f0[2] * cam_view[0] - f0[0] * cam_view[8] >= 0.0f ? 1.0f : -1.0f;
+    const float r0[3] = {f0[2] * render.sign_right, 0.0f, -f0[0] * render.sign_right};
+    const float u0[3] = {f0[1] * r0[2] - f0[2] * r0[1],
+                         f0[2] * r0[0] - f0[0] * r0[2],
+                         f0[0] * r0[1] - f0[1] * r0[0]};
+    render.sign_up = u0[0] * cam_view[1] + u0[1] * cam_view[5] + u0[2] * cam_view[9] >= 0.0f
+                         ? 1.0f
+                         : -1.0f;
+    std::memcpy(render.proj0, scene.proj, sizeof(render.proj0));
+    render.engaged = true;
+    REXLOG_INFO("native-scene script-cam: ENGAGED (Lua-controlled)");
+  }
+
+  double fx = 0.0, fy = 0.0, fz = 1.0;
+  if (cam.has_target) {
+    const double dx = cam.target[0] - cam.pos[0];
+    const double dy = cam.target[1] - cam.pos[1];
+    const double dz = cam.target[2] - cam.pos[2];
+    const double flen = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (flen > 1e-4) {
+      fx = dx / flen;
+      fy = dy / flen;
+      fz = dz / flen;
+    }
+  }
+  const double yaw = std::atan2(fx, fz);
+  const double pitch = std::asin(std::clamp(fy, -1.0, 1.0));
+  const double sy = std::sin(yaw), cy = std::cos(yaw);
+  const double sp = std::sin(pitch), cp = std::cos(pitch);
+  const float fwd[3] = {float(sy * cp), float(sp), float(cy * cp)};
+  const float right[3] = {float(cy) * render.sign_right, 0.0f,
+                          float(-sy) * render.sign_right};
+  const float up[3] = {float(-sp * sy) * render.sign_right * render.sign_up,
+                       float(cp) * render.sign_right * render.sign_up,
+                       float(-sp * cy) * render.sign_right * render.sign_up};
+
+  float view[16] = {};
+  for (int i = 0; i < 3; ++i) {
+    view[i * 4 + 0] = right[i];
+    view[i * 4 + 1] = up[i];
+    view[i * 4 + 2] = fwd[i];
+  }
+  const float posf[3] = {float(cam.pos[0]), float(cam.pos[1]), float(cam.pos[2])};
+  for (int k = 0; k < 3; ++k) {
+    view[12 + k] = -(posf[0] * view[0 * 4 + k] + posf[1] * view[1 * 4 + k] +
+                     posf[2] * view[2 * 4 + k]);
+  }
+  view[15] = 1.0f;
+
+  {
+    std::lock_guard<std::mutex> guest_lock(g_freecam_guest_mutex);
+    std::memcpy(g_freecam_guest_view, view, sizeof(view));
+    std::memcpy(g_freecam_guest_pos, posf, sizeof(posf));
+  }
+  g_freecam_guest_active.store(1, std::memory_order_release);
+  std::memcpy(scene.proj, render.proj0, sizeof(render.proj0));
+  for (int row = 0; row < 4; ++row) {
+    for (int col = 0; col < 4; ++col) {
+      float sum = 0.0f;
+      for (int k = 0; k < 4; ++k) {
+        sum += view[row * 4 + k] * render.proj0[k * 4 + col];
+      }
+      scene.view_proj[row * 4 + col] = sum;
+    }
+  }
+  std::memcpy(scene.cam_pos, posf, sizeof(posf));
+  return true;
+}
+
 bool LoadingOrFrontendActive() {
   if (rex::kernel::guest_presence::GameplayContextValue() != 0) {
     return false;
@@ -10167,13 +10468,24 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
     }
   }
 
-  // Drone / free-fly camera (skate3_native_render_scene_freecam, End key):
-  // runs after the smoothing and synthetic-pan blocks so the flown pose
-  // wins while engaged. No draw-item union here; the SetViewMatrix
-  // override hands the flown pose to the game, whose own culling then
-  // submits exactly what the drone sees (statics AND animated entities).
-  UpdateFreecam(scene, cam_view,
-                std::chrono::duration<double>(build_t0.time_since_epoch()).count());
+  // Drone / free-fly camera (skate3_native_render_scene_freecam): runs
+  // after the smoothing and synthetic-pan blocks so the flown pose wins
+  // while engaged. No draw-item union here; the SetViewMatrix override
+  // hands the flown pose to the game, whose own culling then submits
+  // exactly what the drone sees (statics AND animated entities).
+  //
+  // No longer reachable by a player - its keybind was removed along with
+  // the map editor (bind_skate3_map_editor/_spawn) - so in practice this
+  // always returns false now and the scripted camera below always runs
+  // when a resource has one active. Left callable (the cvar still exists)
+  // rather than deleted: it is the one piece of this the scripted camera's
+  // engagement math was built by copying, and removing it would strand
+  // that comment's "see UpdateFreecam" cross-reference.
+  const double now_s =
+      std::chrono::duration<double>(build_t0.time_since_epoch()).count();
+  if (!UpdateFreecam(scene, cam_view, now_s)) {
+    UpdateScriptCam(scene, cam_view, now_s);
+  }
 
   // Hor+ ultrawide: widen the published camera to the wide output aspect.
   // Applied after every camera override (smoothing, synthetic pan, freecam)

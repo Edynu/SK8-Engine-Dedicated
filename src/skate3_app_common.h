@@ -13,7 +13,11 @@
 #include <rex/rex_app.h>
 #include <rex/ui/overlay/simple_settings_overlay.h>
 
+#include "skate3_dev_console_dialog.h"
+#include "skate3_nui_dialog.h"
+#include "skate3_input_sampler.h"
 #include "skate3_native_debug_dialog.h"
+#include "skate3_player_nameplates.h"
 #include "skate3_map_editor_spawn_dialog.h"
 #include "skate3_release_updater.h"
 #include "skate3_vanilla_ui/skate3_vanilla_ui_dialog.h"
@@ -68,8 +72,16 @@ class Skate3BaseApp : public rex::ReXApp {
   std::unique_ptr<skate3::ReleaseUpdater> release_updater_;
   std::unique_ptr<skate3::NativeDebugDialog> native_debug_dialog_;
   std::unique_ptr<skate3::RenderModeIndicator> render_mode_indicator_;
+  std::unique_ptr<skate3::PlayerNameplateOverlay> player_nameplate_overlay_;
   std::unique_ptr<skate3::MapEditorSpawnDialog>
       map_editor_spawn_dialog_;
+  std::unique_ptr<skate3::Skate3DevConsoleDialog> dev_console_dialog_;
+  // NUI has no keybind and no visibility of its own: it is on whenever a
+  // resource has published a ui_page, and focused whenever a script says so
+  // via SetNuiFocus. See skate3_nui_dialog.h.
+  std::unique_ptr<skate3::Skate3NuiDialog> nui_dialog_;
+  // Draws nothing; exists to sample input once a frame for scripts.
+  std::unique_ptr<skate3::Skate3InputSamplerDialog> input_sampler_dialog_;
   bool recipe_overlay_installed_ = false;
   bool big_device_aliases_installed_ = false;
   std::atomic<uint32_t> debug_marker_count_{0};

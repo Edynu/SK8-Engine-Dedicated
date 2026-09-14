@@ -427,15 +427,36 @@ class PoseGroupReassembler {
                envelope.sequence - header.fragment_index;
   }
 
+  // Plain LRU here starves baseline recovery under loss: a peer's animation
+  // stream keeps pushing new delta groups at its full rate the whole time a
+  // baseline (keyframe) group is being reassembled, so once all slots are
+  // occupied, an in-progress BASELINE can itself become the least-recently-
+  // updated slot and get evicted by an ordinary delta before it ever
+  // completes - the exact group needed to unblock decoding, discarded to
+  // make room for the traffic that cannot decode without it. That is a
+  // permanent stall: eviction keeps happening, so the baseline never
+  // finishes, so nothing else ever decodes either, for as long as the
+  // stream keeps arriving. A delta slot costs nothing to lose - one more
+  // arrives in 1/20s - so prefer evicting the oldest non-baseline slot, and
+  // only fall back to true LRU (which can then only mean every slot is a
+  // baseline) when no non-baseline slot exists.
   [[nodiscard]] std::size_t OldestSlotIndex() const {
-    std::size_t oldest = 0;
-    for (std::size_t index = 1; index < slots_.size(); ++index) {
-      if (slots_[index].last_update_us <
-          slots_[oldest].last_update_us) {
-        oldest = index;
+    std::size_t oldest_any = 0;
+    bool have_non_baseline = false;
+    std::size_t oldest_non_baseline = 0;
+    for (std::size_t index = 0; index < slots_.size(); ++index) {
+      if (slots_[index].last_update_us < slots_[oldest_any].last_update_us) {
+        oldest_any = index;
+      }
+      if (slots_[index].kind != MessageKind::kPoseBaseline &&
+          (!have_non_baseline ||
+           slots_[index].last_update_us <
+               slots_[oldest_non_baseline].last_update_us)) {
+        oldest_non_baseline = index;
+        have_non_baseline = true;
       }
     }
-    return oldest;
+    return have_non_baseline ? oldest_non_baseline : oldest_any;
   }
 
   void RemoveSlot(std::size_t index) {

@@ -171,6 +171,63 @@ if(SKATE3_ENABLE_DLSS_NR_PREVIEW AND NOT SKATE3_ENABLE_DLSS_SR)
         "SKATE3_ENABLE_DLSS_NR_PREVIEW requires SKATE3_ENABLE_DLSS_SR=ON")
 endif()
 
+option(SKATE3_ENABLE_CEF
+    "Enable the CEF-based in-game dev console (F7)"
+    OFF)
+set(SKATE3_CEF_SDK_ROOT "" CACHE PATH
+    "Path to an extracted CEF binary distribution (cef-builds.spotifycdn.com, 'minimal' flavor)")
+
+if(SKATE3_ENABLE_CEF)
+    if(NOT WIN32)
+        message(FATAL_ERROR "SKATE3_ENABLE_CEF is currently supported only on Windows")
+    endif()
+    if(NOT EXISTS "${SKATE3_CEF_SDK_ROOT}/include/cef_version.h")
+        message(FATAL_ERROR
+            "SKATE3_CEF_SDK_ROOT must point to an extracted CEF binary distribution root "
+            "(expected ${SKATE3_CEF_SDK_ROOT}/include/cef_version.h to exist)")
+    endif()
+    # libcef.dll itself ships prebuilt, but the thin C++ wrapper library
+    # (libcef_dll_wrapper) ships as source inside the binary distribution and
+    # must be built from source here. find_package(CEF) is this distribution's
+    # own documented entry point (see its top-level CMakeLists.txt) - it loads
+    # cef_variables.cmake/cef_macros.cmake and defines
+    # CEF_LIBCEF_DLL_WRAPPER_PATH. CEF_RUNTIME_LIBRARY_FLAG defaults to /MT,
+    # matching this project's own CMAKE_MSVC_RUNTIME_LIBRARY above, so the
+    # wrapper and skate3.exe share one CRT - no override needed.
+    set(CEF_ROOT "${SKATE3_CEF_SDK_ROOT}")
+    list(APPEND CMAKE_MODULE_PATH "${CEF_ROOT}/cmake")
+    find_package(CEF REQUIRED)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
+       NOT CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        # cef_variables.cmake's OS_WINDOWS branch unconditionally emits
+        # cl.exe/clang-cl-style "/flag" syntax (via CEF_COMPILER_FLAGS etc,
+        # applied per-target by SET_LIBRARY_TARGET_PROPERTIES in
+        # cef_macros.cmake). This project's own Clang build uses the plain
+        # GNU-style command-line driver (MSVC-ABI output via lld-link, but
+        # "-flag" argument parsing) - passing raw "/W4" etc. to it fails
+        # with "no such file or directory". Override with GNU-equivalent
+        # flags before add_subdirectory() below picks these up; these are
+        # ordinary directory-scoped variables (not cache/global), so the
+        # override only affects the wrapper target's own scope.
+        # CEF_COMPILER_DEFINES is left untouched (plain -D name=value pairs,
+        # syntax-agnostic). The runtime library (/MT) is already handled
+        # correctly for either driver by this project's own
+        # CMAKE_MSVC_RUNTIME_LIBRARY setting above, so it's dropped here
+        # rather than duplicated.
+        set(CEF_COMPILER_FLAGS -fno-rtti -finput-charset=UTF-8 -fexec-charset=UTF-8)
+        set(CEF_C_COMPILER_FLAGS "")
+        set(CEF_CXX_COMPILER_FLAGS "")
+        set(CEF_COMPILER_FLAGS_DEBUG "")
+        set(CEF_COMPILER_FLAGS_RELEASE "")
+        set(CEF_LINKER_FLAGS "")
+        set(CEF_LINKER_FLAGS_DEBUG "")
+        set(CEF_LINKER_FLAGS_RELEASE "")
+        set(CEF_EXE_LINKER_FLAGS "")
+        set(CEF_SHARED_LINKER_FLAGS "")
+    endif()
+    add_subdirectory("${CEF_LIBCEF_DLL_WRAPPER_PATH}" "${CMAKE_BINARY_DIR}/libcef_dll_wrapper")
+endif()
+
 if(NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
     if(SKATE3_ENABLE_X86_64_V3)
         if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -358,6 +415,10 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_app_common.cpp
     src/skate3_cac_archive.cpp
     src/skate3_cac_catalogue.cpp
+    src/skate3_clothing.cpp
+    src/skate3_guest_probe.cpp
+    src/skate3_flash_bridge.cpp
+    src/skate3_retail_ui_hooks.cpp
     src/skate3_cac_gesture.cpp
     src/skate3_dlc_runtime.cpp
     src/skate3_custom_trick.cpp
@@ -383,13 +444,27 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_target_trace.cpp
     src/skate3_trick_overrides.cpp
     src/skate3_trick_pipeline.cpp
+    src/skate3_cef_browser.cpp
+    src/skate3_cef_console.cpp
+    src/skate3_cef_gamepad.cpp
+    src/skate3_cef_nui.cpp
+    src/skate3_dev_console_dialog.cpp
+    src/skate3_input_sampler.cpp
+    src/skate3_input_state.cpp
+    src/skate3_nui_dialog.cpp
     src/skate3_iso_installer.cpp
+    src/skate3_appearance_service.cpp
+    src/skate3_prop_service.cpp
+    src/skate3_lua_admin_http.cpp
+    src/skate3_lua_client_natives.cpp
+    src/skate3_lua_script_host.cpp
     src/native/skate3_native_diagnostics.cpp
     src/native/skate3_native_entity.cpp
     src/native/skate3_native_guest_read.cpp
     src/native/skate3_native_lw.cpp
     src/native/skate3_native_palette.cpp
     src/skate3_native_debug_dialog.cpp
+    src/skate3_player_nameplates.cpp
     src/skate3_vanilla_ui/skate3_ui_asset_cache.cpp
     src/skate3_vanilla_ui/skate3_ui_audio.cpp
     src/skate3_vanilla_ui/skate3_ui_scene.cpp
@@ -468,6 +543,7 @@ set(SKATE3_NATIVE_SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/ssao.hlsl
     ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/hdr.hlsl
     ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/ssr.hlsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/dev_console.hlsl
 )
 # Shared .hlsli headers, inlined into the embedded sources by
 # EmbedShaders.cmake: the embed must rerun when any of them changes.
@@ -534,6 +610,15 @@ else()
         SKATE3_ENABLE_DLSS_SR=0
         SKATE3_ENABLE_DLSS_NR_PREVIEW=0)
 endif()
+if(SKATE3_ENABLE_CEF)
+    target_compile_definitions(skate3 PRIVATE SKATE3_ENABLE_CEF=1)
+    target_include_directories(skate3 PRIVATE "${SKATE3_CEF_SDK_ROOT}")
+    target_link_libraries(skate3 PRIVATE
+        libcef_dll_wrapper
+        "${SKATE3_CEF_SDK_ROOT}/Release/libcef.lib")
+else()
+    target_compile_definitions(skate3 PRIVATE SKATE3_ENABLE_CEF=0)
+endif()
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""
    OR SKATE3_HAS_LOOSE_TITLE_UPDATE
    OR SKATE3_RUNTIME_TITLE_UPDATE)
@@ -563,7 +648,7 @@ endif()
 
 target_link_libraries(
     skate3 PRIVATE
-    rex::runtime skate_owned_world snappy ZLIB::ZLIBSTATIC)
+    rex::runtime skate_owned_world snappy ZLIB::ZLIBSTATIC lua httplib)
 rexglue_configure_target(skate3)
 
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""
@@ -588,6 +673,29 @@ if(WIN32)
         advapi32 comdlg32 winhttp d3d12 d3dcompiler dxgi dxguid gdiplus winmm ws2_32)
 endif()
 
+# Standalone, non-authoritative visual relay. Deliberately independent of the
+# game/rendering/rexglue-sdk build graph: it only shares the two header-only
+# wire-protocol/routing definitions with skate3, so it builds fast and stays
+# small. See MULTIPLAYER.md's "Dedicated relay" section.
+add_executable(skate3_dedicated
+    tools/relay/skate3_dedicated_main.cpp
+    tools/relay/skate3_dedicated_metrics.cpp
+    tools/relay/skate3_dedicated_config.cpp
+    src/skate3_lua_admin_http.cpp
+    src/skate3_lua_script_host.cpp
+)
+target_include_directories(skate3_dedicated PRIVATE src tools/relay)
+target_compile_features(skate3_dedicated PRIVATE cxx_std_23)
+if(MSVC)
+    target_compile_options(skate3_dedicated PRIVATE /W4 /permissive- /utf-8)
+else()
+    target_compile_options(skate3_dedicated PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+target_link_libraries(skate3_dedicated PRIVATE lua httplib)
+if(WIN32)
+    target_link_libraries(skate3_dedicated PRIVATE ws2_32)
+endif()
+
 set(SKATE3_REXRUNTIME_TARGET rexruntime)
 if(NOT TARGET rexruntime AND TARGET rex::runtime)
     set(SKATE3_REXRUNTIME_TARGET rex::runtime)
@@ -602,6 +710,73 @@ add_custom_target(skate3_stage_runtime_library
     VERBATIM
 )
 add_dependencies(skate3 skate3_stage_runtime_library)
+
+# Stage the resources/ tree (Lua scripting resources, e.g. Teleport) next to
+# skate3_dedicated - it is the authoritative source of resource content,
+# serving client_script source to connecting clients over its admin HTTP API
+# (see skate3_lua_admin_http.cpp's /api/scripts routes; a connected client's
+# own copy is then overwritten by that push - see EnsureResourceFromSource).
+# Also staged next to skate3 itself for the F7 dev console's own local-only
+# workflow (LuaScriptHost::DiscoverResources + the console's "restart <name>"
+# line - skate3_lua_client_natives.cpp's ExecuteConsoleLine): editing a file
+# here and rebuilding refreshes BOTH copies, instead of only the file the
+# client happened to already have from some earlier manual copy.
+add_custom_target(skate3_stage_resources
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources"
+        "$<TARGET_FILE_DIR:skate3_dedicated>/resources"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources"
+        "$<TARGET_FILE_DIR:skate3>/resources"
+    VERBATIM
+)
+add_dependencies(skate3_dedicated skate3_stage_resources)
+add_dependencies(skate3 skate3_stage_resources)
+
+# Stage the F7 dev console's own frontend page (served by the client's admin
+# HTTP server - see skate3_lua_client_natives.cpp's Initialize, web_console_dir)
+# plus the built React dashboard (Console/Active Players/Scripts), served at
+# "/" by the same AdminHttpServer::set_mount_point. Only console.html and
+# dist/ are copied - web-console/ also holds the dashboard's full source
+# tree (node_modules included, ~100MB), which nothing here needs staged.
+#
+# dist/ is a checked-in build product (`npm run build` inside web-console/),
+# not rebuilt by this target - CMake has no Node toolchain wired in, so
+# regenerate it by hand after changing web-console/src and re-run configure.
+add_custom_target(skate3_stage_web_console
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "$<TARGET_FILE_DIR:skate3>/web-console"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/web-console/console.html"
+        "$<TARGET_FILE_DIR:skate3>/web-console"
+    VERBATIM
+)
+add_dependencies(skate3 skate3_stage_web_console)
+
+add_custom_target(skate3_dedicated_stage_web_console
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "$<TARGET_FILE_DIR:skate3_dedicated>/web-console"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/web-console/console.html"
+        "$<TARGET_FILE_DIR:skate3_dedicated>/web-console"
+    VERBATIM
+)
+add_dependencies(skate3_dedicated skate3_dedicated_stage_web_console)
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/web-console/dist")
+    add_custom_command(TARGET skate3_stage_web_console POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/web-console/dist"
+            "$<TARGET_FILE_DIR:skate3>/web-console"
+        VERBATIM
+    )
+    add_custom_command(TARGET skate3_dedicated_stage_web_console POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/web-console/dist"
+            "$<TARGET_FILE_DIR:skate3_dedicated>/web-console"
+        VERBATIM
+    )
+endif()
 
 if(SKATE3_ENABLE_DLSS_SR)
     add_custom_target(skate3_stage_dlss_runtime
@@ -629,6 +804,39 @@ if(SKATE3_ENABLE_DLSS_SR)
             VERBATIM)
         add_dependencies(skate3 skate3_stage_dlss_nr_preview)
     endif()
+endif()
+
+if(SKATE3_ENABLE_CEF)
+    add_custom_target(skate3_stage_cef_runtime
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SKATE3_CEF_SDK_ROOT}/Release/libcef.dll"
+            "${SKATE3_CEF_SDK_ROOT}/Release/chrome_elf.dll"
+            "${SKATE3_CEF_SDK_ROOT}/Release/d3dcompiler_47.dll"
+            "${SKATE3_CEF_SDK_ROOT}/Release/dxcompiler.dll"
+            "${SKATE3_CEF_SDK_ROOT}/Release/dxil.dll"
+            "${SKATE3_CEF_SDK_ROOT}/Release/libEGL.dll"
+            "${SKATE3_CEF_SDK_ROOT}/Release/libGLESv2.dll"
+            "${SKATE3_CEF_SDK_ROOT}/Release/v8_context_snapshot.bin"
+            "${SKATE3_CEF_SDK_ROOT}/Release/vk_swiftshader.dll"
+            "${SKATE3_CEF_SDK_ROOT}/Release/vk_swiftshader_icd.json"
+            "${SKATE3_CEF_SDK_ROOT}/Release/vulkan-1.dll"
+            "$<TARGET_FILE_DIR:skate3>"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${SKATE3_CEF_SDK_ROOT}/Resources/locales"
+            "$<TARGET_FILE_DIR:skate3>/locales"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SKATE3_CEF_SDK_ROOT}/Resources/icudtl.dat"
+            "${SKATE3_CEF_SDK_ROOT}/Resources/chrome_100_percent.pak"
+            "${SKATE3_CEF_SDK_ROOT}/Resources/chrome_200_percent.pak"
+            "${SKATE3_CEF_SDK_ROOT}/Resources/resources.pak"
+            "$<TARGET_FILE_DIR:skate3>"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:skate3>/licenses/CEF"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SKATE3_CEF_SDK_ROOT}/LICENSE.txt"
+            "$<TARGET_FILE_DIR:skate3>/licenses/CEF"
+        VERBATIM)
+    add_dependencies(skate3 skate3_stage_cef_runtime)
 endif()
 
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")

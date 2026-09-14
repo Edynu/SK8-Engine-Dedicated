@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <deque>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -259,6 +260,30 @@ inline std::atomic<bool> g_vanilla_ui_backdrop{false};
 // Emulated-post blur diagnostics: reset on each menu open so every open
 // logs a fresh burst.
 inline std::atomic<uint32_t> g_post_blur_log_count{0};
+// Lua dev console (F7) visibility: set from the app UI thread
+// (Skate3DevConsoleDialog::Show/Hide), read by both RenderScene (Native
+// mode) and PostProcessGuestOutput (Emulated mode) to decide whether to
+// draw the CEF overlay this frame.
+inline std::atomic<bool> g_dev_console_visible{false};
+// The guest_output size DrawDevConsoleOverlay last drew the console
+// against (see native_scene::GetLastGuestOutputSize). Internal render
+// resolution can differ from the OS window's physical size (DLSS,
+// resolution_scale/draw_resolution_scale_x/y), so the app-thread input
+// dialog needs this to convert io.MousePos (window pixels) into the same
+// pixel space the console's fixed on-screen rect (kConsoleScreenX/Y/Width/
+// Height, in guest_output pixels) is defined in - a raw 1:1 subtraction is
+// only correct when the two happen to match.
+inline std::atomic<uint32_t> g_dev_console_guest_output_w{0};
+inline std::atomic<uint32_t> g_dev_console_guest_output_h{0};
+// NUI layer visibility: true whenever at least one resource has published
+// a ui_page (see cef_nui::HasContent). Unlike the dev console this is not a
+// user toggle - a resource with UI is simply always on screen, and the
+// resource itself decides what, if anything, its page draws.
+inline std::atomic<bool> g_nui_visible{false};
+// guest_output size DrawNuiOverlay last drew NUI against, for the same
+// window-pixels-to-guest-pixels conversion the dev console needs above.
+inline std::atomic<uint32_t> g_nui_guest_output_w{0};
+inline std::atomic<uint32_t> g_nui_guest_output_h{0};
 // Selected-object outline capture (see DrawItem::selected): in the park
 // editor / object mover the game EXCLUDES the selected object from the main
 // color pass and re-draws it right after the sky, twice, back to back, the

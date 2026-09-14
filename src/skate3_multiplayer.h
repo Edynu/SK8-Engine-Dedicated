@@ -1,8 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace skate3::multiplayer {
@@ -80,6 +83,51 @@ struct RemotePresentationFrame {
   std::vector<RemotePeerRetirement> retirements;
 };
 
+// The ONE exception to "everything here is render-thread-only": a
+// cross-thread published copy of the most recent RemotePresentationFrame's
+// players, so a Lua native (which can run on the render thread via a
+// resource's Skate.CreateThread, or on the admin-HTTP thread pool via a
+// console command - two different threads, both real) has something safe
+// to read regardless of which one it landed on.
+//
+// PublishLatestRemotePlayers is called exactly once, from the render
+// thread, right after TickLocalVisuals returns each frame (see the call
+// site in skate3_native_scene_gpu.cpp) - never compute a position here,
+// only publish what TickLocalVisuals already computed. That is deliberate:
+// the smoothing/interpolation that turns raw network samples into a
+// position lives in exactly one place (TickLocalVisuals), and duplicating
+// it to reach a second thread would be two implementations of the same
+// math drifting apart, not a feature.
+//
+// The atomic swap is real, not a formality: `players` is already a
+// shared_ptr the render thread hands off wholesale each frame, so this is
+// one atomic store of a pointer - no copy of the vector, no lock held
+// across a read a Lua native might do at an inconvenient moment.
+// The animation send rate this server wants, in Hz, from its /api/settings.
+// Zero restores the local cvar. The server owns this because it is the one
+// that knows how many players it has to fan the stream out to - the relay can
+// thin a stream down for distant peers, but it cannot invent samples that
+// were never sent, so the ceiling has to be set at the source.
+void SetServerAnimationRate(int hz);
+
+// The root-snapshot rate this server wants, in Hz. Separate from the
+// animation rate because position and pose are sent on different schedules -
+// position was defaulting to 60Hz while the pose ran at 10, which made it a
+// fifth of the stream for detail nobody was asking for.
+void SetServerPoseRate(int hz);
+
+// Refresh rates for the finger and face bone groups, in Hz. Negative means
+// the server has not specified and the local cvars apply; 0 means keyframes
+// only. Both ends derive the same schedule from these, which is what keeps
+// the sender and receiver agreeing on which frames carry those bones.
+void SetServerDetailRates(int hands_hz, int face_hz);
+
+void PublishLatestRemotePlayers(
+    std::shared_ptr<const std::vector<RemotePlayer>> players);
+// nullptr if nothing has been published yet (no session, or the first
+// frame hasn't run) - never a dangling or half-written list.
+std::shared_ptr<const std::vector<RemotePlayer>> LatestRemotePlayers();
+
 // Samples the verified local board, services the current transport, and
 // returns independently smoothed remote players alive on the same map. The
 // first transport is localhost UDP; the packet and pose seam is deliberately
@@ -91,6 +139,35 @@ bool TickLocalVisuals(const char* map_name,
                        RemotePresentationFrame& out_presentation);
 
 void AppendTelemetry(std::ostream& out);
+
+// JSON twin of AppendTelemetry, for the admin HTTP /api/metrics route: just
+// upload/download bandwidth and packet rates, not the full internal dump.
+// Safe to call from any thread.
+std::string NetworkTelemetryJson();
+
+// One line for a "netstat" console command - the human-readable twin of
+// NetworkTelemetryJson. Safe to call from any thread.
+std::string FormatNetworkTelemetryLine();
+
+// --- Script events -------------------------------------------------
+//
+// Lua net events ride the game protocol's general reliable channel (see
+// skate3_multiplayer_protocol_v12_reliable.h), addressed to the dedicated
+// server rather than to peers: the server is the authority and decides who
+// an event reaches.
+
+// Queues one event for the server. `json_args` is the argument list already
+// encoded as a JSON array by the Lua host. Returns false when there is no
+// server connection yet, or the channel refused the message - the caller
+// should surface that rather than assume it was sent.
+bool SendScriptEvent(std::string_view event, std::string_view json_args);
+
+// Called on the network worker thread for every script event that arrives
+// from the server, in the order the server queued them. Install before
+// connecting; passing an empty handler drops inbound events.
+using ScriptEventHandler =
+    std::function<void(const std::string& event, const std::string& json_args)>;
+void SetScriptEventHandler(ScriptEventHandler handler);
 
 // Reports that the renderer committed the complete sender-owned appearance
 // currently associated with this role, process session, and identity. Stale

@@ -1,11 +1,17 @@
 #include "skate3_app_common.h"
 
+#include "skate3_cef_console.h"
+#include "skate3_cef_nui.h"
 #include "skate3_custom_trick.h"
 #include "skate3_demo_path.h"
+#include "skate3_retail_ui_hooks.h"
 #include "skate3_dlss_sr.h"
 #include "skate3_fov.h"
 #include "skate3_input_lab.h"
 #include "skate3_iso_installer.h"
+#include "skate3_appearance_service.h"
+#include "skate3_prop_service.h"
+#include "skate3_lua_client_natives.h"
 #include "skate3_map_editor.h"
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_multiplayer_assets.h"
@@ -106,6 +112,25 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_showcase);
 // and while it captures input the guest input system is gated off.
 REXCVAR_DECLARE(bool, skate3_native_render_scene_freecam);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_freecam_capture_input);
+
+REXCVAR_DEFINE_BOOL(
+    skate3_no_retail_missions, false, "Skate 3",
+    "Deny retail's mission ASSET archive (data/content/missions.big, 508 "
+    "streamed content packages). This stops the mission scenery loading, but "
+    "does NOT remove the sign-up markers: the challenge definitions live in "
+    "data/big/db.big, which cannot simply be denied - the game does not "
+    "finish booting without it. Useful today only to save streaming work in "
+    "an online session; removing the markers is skate3_no_retail_challenges.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_BOOL(
+    skate3_no_retail_challenges, false, "Skate 3",
+    "Deny retail's career challenge data - the challenge_local_data VLT files "
+    "inside db.big - so no challenge exists to mark, in the world or on the "
+    "minimap. db.big itself cannot be denied (the game will not boot), but "
+    "these individual files can. Set at launch, not at runtime: the data is "
+    "read while the world loads.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_STRING(skate3_dlc_root, "", "Skate 3",
                       "Directory containing Skate 3 DLC package files");
@@ -1135,6 +1160,11 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer *drawer) {
   // so it never affects cursor or focus handling.
   render_mode_indicator_ =
       std::make_unique<skate3::RenderModeIndicator>(drawer);
+  // Floating names over other synced players - always on while online, no
+  // cvar, no keybind (see skate3_player_nameplates.h's own comment on why
+  // this is native rather than a toggle).
+  player_nameplate_overlay_ =
+      std::make_unique<skate3::PlayerNameplateOverlay>(drawer);
   map_editor_spawn_dialog_ =
       std::make_unique<skate3::MapEditorSpawnDialog>(drawer);
   auto poll_vanilla_ui_gamepad = [this]() {
@@ -1218,14 +1248,18 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer *drawer) {
       window() ? window()->GetNativeWindowHandle() : nullptr);
   skate3::map_editor::SetWindowHandle(
       window() ? window()->GetNativeWindowHandle() : nullptr);
-  rex::ui::RegisterBind("bind_skate3_map_editor", "G",
-                        "Toggle in-game map editor", [] {
-                          skate3::map_editor::Toggle();
-                        });
-  rex::ui::RegisterBind("bind_skate3_map_editor_spawn", "E",
-                        "Toggle map-editor object list", [] {
-                          skate3::map_editor::ToggleSpawnMenu();
-                        });
+  // The in-game map editor (G, forced the freecam on entry) and its object
+  // spawn list (E) are gone as PLAYER-reachable tools - no keybind reaches
+  // either anymore. The camera capability itself did not go away, it moved:
+  // skate3_native_scene.h's ScriptCam* functions give a resource the same
+  // fly-anywhere camera, driven by Lua (CreateCam/MoveCam/LookAtCam/
+  // SetCamActive) instead of a keybind, which is also the only form of it
+  // that makes sense with an online session running - a debug camera a
+  // player can pop open themselves has no place there.
+  //
+  // map_editor.cpp itself is untouched (still reachable from a resource
+  // that calls it directly, if one ever needs to); only the two binds that
+  // let a player reach it unassisted are removed.
   rex::ui::RegisterBind("bind_skate3_screenshot", "Shift+F6",
                         "Save screenshot to screenshots/", [this] {
                           skate3::screenshot::CaptureWindow(
@@ -1240,6 +1274,24 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer *drawer) {
   rex::ui::RegisterBind("bind_skate3_native_render_toggle", "F5",
                         "Toggle native/emulated renderer",
                         [] { skate3::native_scene::ToggleSceneEnabled(); });
+  rex::ui::RegisterBind("bind_skate3_dev_console", "F7",
+                        "Toggle Lua dev console", [this] {
+                          if (!dev_console_dialog_) {
+                            return;
+                          }
+                          // The game hides/auto-hides the OS cursor during
+                          // normal play (skateboarding has no mouse-look),
+                          // so a click never reaches the console's <input>
+                          // without this - same fix ToggleNativeDebug uses
+                          // for its own dialog.
+                          if (dev_console_dialog_->visible()) {
+                            dev_console_dialog_->Hide();
+                            ApplyGameplayCursorMode();
+                          } else {
+                            ApplySettingsCursorMode();
+                            dev_console_dialog_->Show();
+                          }
+                        });
   rex::ui::RegisterBind("bind_skate3_save_draw_fingerprints", "F8",
                         "Save draw fingerprint log",
                         [this] { SaveDrawFingerprintLog(); });
@@ -1248,6 +1300,15 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer *drawer) {
                         [this] { LogDebugMarker(); });
   rex::ui::RegisterBind("bind_skate3_log_user_marker", "F10",
                         "Write marker to log", [this] { LogUserMarker(); });
+  // Coverage capture, for finding what retail does when it does something.
+  // A key rather than a console command because the console only exists in an
+  // online session, and some of what is worth capturing only happens offline.
+  //
+  // F11, not Shift+F9: a modifier does not distinguish this from the plain F9
+  // bind below, which swallowed it.
+  rex::ui::RegisterBind("bind_skate3_coverage_capture", "F11",
+                        "Arm / write function coverage capture",
+                        [] { skate3::retail_ui::ToggleCoverageCapture(); });
   rex::ui::RegisterBind("bind_skate3_native_debug", "F12",
                         "Native render debug menu",
                         [this] { ToggleNativeDebug(); });
@@ -1263,14 +1324,10 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer *drawer) {
         REXCVAR_SET(skate3_native_render_scene_showcase,
                     !REXCVAR_GET(skate3_native_render_scene_showcase));
       });
-  rex::ui::RegisterBind(
-      "bind_skate3_freecam", "End", "Drone camera (free fly)", [] {
-        if (skate3::map_editor::Active()) {
-          return;
-        }
-        REXCVAR_SET(skate3_native_render_scene_freecam,
-                    !REXCVAR_GET(skate3_native_render_scene_freecam));
-      });
+  // The End-key freecam bind is gone for the same reason the map editor's
+  // is: skate3_native_render_scene_freecam is still a real cvar (a resource
+  // or the console can still set it), it just has no keybind handing it to
+  // a player directly anymore. Use ScriptCam* from Lua instead.
 }
 
 void Skate3BaseApp::OnPostSetup() {
@@ -1313,14 +1370,21 @@ void Skate3BaseApp::OnPostSetup() {
       const bool settings_visible =
           (simple_settings_dialog_ && simple_settings_dialog_->visible()) ||
           (vanilla_ui_prototype_dialog_ &&
-           vanilla_ui_prototype_dialog_->visible());
+           vanilla_ui_prototype_dialog_->visible()) ||
+          (dev_console_dialog_ && dev_console_dialog_->visible());
       const bool xam_ui_active = rex::kernel::xam::xeXamIsUIActive();
       // The drone cam owns the keyboard while flying: keep guest input off
       // so the fly keys don't also steer the skater.
       const bool freecam_captures =
           REXCVAR_GET(skate3_native_render_scene_freecam) &&
           REXCVAR_GET(skate3_native_render_scene_freecam_capture_input);
-      return !settings_visible && !xam_ui_active &&
+      // A script that took NUI focus owns the input - unless it asked to
+      // keep gameplay running underneath (SetNuiFocusKeepInput), which is
+      // the idiom for a HUD or overlay you can click without parking the
+      // skater.
+      const bool nui_captures =
+          skate3::cef_nui::HasFocus() && !skate3::cef_nui::KeepInput();
+      return !settings_visible && !xam_ui_active && !nui_captures &&
              !freecam_captures && !skate3::map_editor::Active();
     });
     input_system->SetMenuChordCallback([this]() {
@@ -1359,6 +1423,7 @@ void Skate3BaseApp::OnPostSetup() {
   auto *dispatcher = runtime()->function_dispatcher();
   skate3::native_render::Install();
   skate3::demo_path::InstallHooks(dispatcher);
+  skate3::retail_ui::InstallHooks(dispatcher);
   skate3::custom_trick::InstallHooks(dispatcher);
   skate3::scoring::InstallHooks(dispatcher);
   skate3::input_lab::InstallHooks(dispatcher);
@@ -1389,6 +1454,75 @@ void Skate3BaseApp::OnPostSetup() {
   // Steam is optional for process startup. Begin low-frequency availability
   // monitoring only after the app and its input system are fully usable.
   skate3::multiplayer::steam::StartAvailabilityMonitor();
+
+  skate3::lua_client::Initialize();
+  // The port Initialize() actually bound, never the base constant: with two
+  // clients on one machine the second binds a different port, and pointing
+  // its console at the base would open the FIRST client's console instead.
+  skate3::cef_console::Initialize(skate3::lua_client::DevConsoleAdminPort());
+  dev_console_dialog_ =
+      std::make_unique<skate3::Skate3DevConsoleDialog>(imgui_drawer());
+
+  // Raw pad poll for the NUI pointer: bypasses the is_active gate, which is
+  // exactly what zeroes guest-facing input while NUI holds focus - the same
+  // reason the settings dialog polls this way.
+  auto poll_nui_gamepad = [this]() {
+    skate3::cef_gamepad::PadSnapshot pad;
+    auto *rt = runtime();
+    auto *input_system =
+        rt ? static_cast<rex::input::InputSystem *>(rt->input_system())
+           : nullptr;
+    if (input_system) {
+      rex::input::X_INPUT_GAMEPAD state = {};
+      if (input_system->GetUiGamepadState(&state)) {
+        pad.connected = true;
+        pad.buttons = state.buttons;
+        pad.thumb_lx = state.thumb_lx;
+        pad.thumb_ly = state.thumb_ly;
+        pad.thumb_rx = state.thumb_rx;
+        pad.thumb_ry = state.thumb_ry;
+        pad.left_trigger = state.left_trigger;
+        pad.right_trigger = state.right_trigger;
+      }
+    }
+    return pad;
+  };
+  // NUI focus is script-driven and can flip at any moment, so the cursor
+  // policy has to be re-derived rather than simply toggled: something else
+  // (the settings screen, the dev console) may still want it visible.
+  auto apply_nui_cursor_mode = [this](bool wants_cursor) {
+    if (wants_cursor) {
+      ApplySettingsCursorMode();
+      return;
+    }
+    const bool other_overlay_wants_cursor =
+        (dev_console_dialog_ && dev_console_dialog_->visible()) ||
+        (simple_settings_dialog_ && simple_settings_dialog_->visible()) ||
+        (vanilla_ui_prototype_dialog_ &&
+         vanilla_ui_prototype_dialog_->visible());
+    if (other_overlay_wants_cursor) {
+      ApplySettingsCursorMode();
+    } else {
+      ApplyGameplayCursorMode();
+    }
+  };
+  nui_dialog_ = std::make_unique<skate3::Skate3NuiDialog>(
+      imgui_drawer(), poll_nui_gamepad, std::move(apply_nui_cursor_mode));
+
+  // Script-visible input. The pad is read raw (a marker you hold a
+  // direction on has to work whatever else is on screen), but the keyboard
+  // is reported only while gameplay owns it, so typing in the console or a
+  // NUI field cannot also drive a game mode.
+  input_sampler_dialog_ = std::make_unique<skate3::Skate3InputSamplerDialog>(
+      imgui_drawer(), std::move(poll_nui_gamepad), [this]() {
+        const bool overlay_owns_keyboard =
+            (simple_settings_dialog_ && simple_settings_dialog_->visible()) ||
+            (vanilla_ui_prototype_dialog_ &&
+             vanilla_ui_prototype_dialog_->visible()) ||
+            (dev_console_dialog_ && dev_console_dialog_->visible()) ||
+            skate3::cef_nui::HasFocus();
+        return !overlay_owns_keyboard;
+      });
 }
 
 void Skate3BaseApp::OnShutdown() {
@@ -1397,15 +1531,21 @@ void Skate3BaseApp::OnShutdown() {
   rex::ui::UnregisterBind("bind_skate3_menu_alt");
   rex::ui::UnregisterBind("bind_skate3_vanilla_ui_prototype");
   rex::ui::UnregisterBind("bind_skate3_screenshot");
+  rex::ui::UnregisterBind("bind_skate3_dev_console");
   rex::ui::UnregisterBind("bind_skate3_save_draw_fingerprints");
   rex::ui::UnregisterBind("bind_skate3_log_debug_marker");
   rex::ui::UnregisterBind("bind_skate3_log_user_marker");
   rex::ui::UnregisterBind("bind_skate3_native_debug");
-  rex::ui::UnregisterBind("bind_skate3_map_editor");
-  rex::ui::UnregisterBind("bind_skate3_map_editor_spawn");
   ApplyGameplayCursorMode();
   skate3::native_scene::SetVanillaUiBackdrop(false);
   skate3::native_scene::SetSettingsMenuBlur(false);
+  skate3::cef_console::Shutdown();
+  // Joins the appearance service's worker before the process tears down:
+  // it holds an HTTP client pointed at a server that may already be gone,
+  // and a detached thread waking into freed state is a crash on exit.
+  skate3::prop_service::Shutdown();
+  skate3::appearance_service::Shutdown();
+  skate3::lua_client::Shutdown();
   skate3::multiplayer::ShutdownSessions();
   skate3::multiplayer_assets::ShutdownLocalCatalogue();
   vanilla_ui_prototype_dialog_.reset();
@@ -1413,7 +1553,11 @@ void Skate3BaseApp::OnShutdown() {
   release_updater_.reset();
   native_debug_dialog_.reset();
   render_mode_indicator_.reset();
+  player_nameplate_overlay_.reset();
   map_editor_spawn_dialog_.reset();
+  dev_console_dialog_.reset();
+  nui_dialog_.reset();
+  input_sampler_dialog_.reset();
 }
 
 void Skate3BaseApp::ToggleSimpleSettings() {
@@ -1439,7 +1583,7 @@ void Skate3BaseApp::ToggleSimpleSettings() {
     for (int i = 0; i < static_cast<int>(store.profiles.size()); ++i) {
       const auto &profile = store.profiles[i];
       state.profiles.push_back(
-          {profile.id, profile.gamertag, profile.signed_in});
+          {profile.id, profile.gamertag, profile.signed_in, profile.live_signed_in});
       if (profile.id == store.selected_profile) {
         state.selected_index = i;
       }
@@ -1447,7 +1591,7 @@ void Skate3BaseApp::ToggleSimpleSettings() {
     return state;
   };
   auto save_profile = [this](int selected_index, std::string gamertag,
-                             bool signed_in) {
+                             bool signed_in, bool live_signed_in) {
     auto store = skate3::LoadProfiles(profiles_path_);
     skate3::EnsureUsableProfileStore(store, "Player");
     if (store.profiles.empty()) {
@@ -1460,9 +1604,8 @@ void Skate3BaseApp::ToggleSimpleSettings() {
       profile.gamertag = std::move(gamertag);
     }
     profile.signed_in = signed_in;
-    if (!profile.signed_in) {
-      profile.live_signed_in = false;
-    }
+    // Xbox Live sign-in requires the local profile to be signed in too.
+    profile.live_signed_in = signed_in && live_signed_in;
     store.selected_profile = profile.id;
     skate3::SaveProfiles(profiles_path_, store);
     skate3::ApplyProfileCvars(profile);
@@ -1531,6 +1674,11 @@ void Skate3BaseApp::ToggleSimpleSettings() {
   auto join_multiplayer = [active_map_name](const std::string &server_id,
                                             const std::string &password) {
     skate3::multiplayer::JoinSession(server_id, password, active_map_name());
+  };
+  auto connect_dedicated_multiplayer = [active_map_name](
+                                           const std::string &address,
+                                           const std::string &token) {
+    skate3::multiplayer::ConnectDedicated(address, token, active_map_name());
   };
   auto leave_multiplayer = []() { skate3::multiplayer::LeaveSession(); };
   auto load_maps = [this]() { return DiscoverCustomMaps(maps_path_); };
@@ -1679,7 +1827,8 @@ void Skate3BaseApp::ToggleSimpleSettings() {
       imgui_drawer(), user_settings_path_, std::move(load_profiles),
       std::move(save_profile), std::move(load_multiplayer),
       std::move(host_multiplayer), std::move(join_multiplayer),
-      std::move(leave_multiplayer), std::move(load_maps),
+      std::move(connect_dedicated_multiplayer), std::move(leave_multiplayer),
+      std::move(load_maps),
       std::move(activate_map), std::move(open_maps_folder),
       std::move(load_world_lighting), std::move(update_world_lighting),
       std::move(reset_world_lighting), std::move(load_update_state),
@@ -1718,6 +1867,21 @@ void Skate3BaseApp::ApplySettingsCursorMode() {
 }
 
 void Skate3BaseApp::ApplyGameplayCursorMode() {
+  // A script holding NUI focus with a cursor outranks "back to gameplay".
+  //
+  // A dozen places call this when THEIR overlay closes - the settings
+  // screen, the dev console, the map editor, the boot sequence - and each
+  // of them would otherwise hide the cursor out from under an unrelated NUI
+  // page that still needs it. That is not cosmetic: with the cursor
+  // auto-hidden the ImGui backend reports io.MousePos as -FLT_MAX, so
+  // Skate3NuiDialog::ForwardMouse rejects every position as out of bounds
+  // and nothing is ever forwarded. The page renders perfectly and ignores
+  // the mouse completely, with no error anywhere - which is exactly how
+  // this presented.
+  if (skate3::cef_nui::HasFocus() && skate3::cef_nui::HasCursor()) {
+    ApplySettingsCursorMode();
+    return;
+  }
   if (window()) {
     window()->SetCursorVisibility(
         rex::ui::Window::CursorVisibility::kAutoHidden);

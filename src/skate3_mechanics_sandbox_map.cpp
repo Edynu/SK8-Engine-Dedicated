@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -1538,9 +1539,48 @@ const skate::world::MapDefinition& ActiveDefinition() {
   return ActiveWorld().Definition();
 }
 
+// How many editable objects the loaded map package brought with it, captured
+// immediately before the FIRST runtime spawn.
+//
+// Needed because the retail-map overlay draws editable objects while the
+// owned base map is not drawn. The map package's own objects belong to that
+// base map, so drawing them over the retail world would scatter a custom
+// map's furniture across Downtown. Anything at or past this index was
+// spawned at runtime and is the only thing the overlay shows.
+std::optional<std::size_t> g_runtime_spawn_base;
+
+// Per-prop render distance, keyed by editable-object index. Zero means "no
+// limit". Kept beside the definition rather than inside MapObject so the
+// owned-world library stays unaware of a runtime-only concern.
+std::unordered_map<std::size_t, float> g_runtime_prop_lod;
+std::mutex g_runtime_prop_lod_mutex;
+
+void SetRuntimePropLodDistance(std::size_t object_index, float distance) {
+  std::lock_guard<std::mutex> lock(g_runtime_prop_lod_mutex);
+  if (distance > 0.0f) {
+    g_runtime_prop_lod[object_index] = distance;
+  } else {
+    g_runtime_prop_lod.erase(object_index);
+  }
+}
+
+float RuntimePropLodDistance(std::size_t object_index) {
+  std::lock_guard<std::mutex> lock(g_runtime_prop_lod_mutex);
+  const auto found = g_runtime_prop_lod.find(object_index);
+  return found == g_runtime_prop_lod.end() ? 0.0f : found->second;
+}
+
+std::size_t RuntimeSpawnedObjectFirstIndex() {
+  return g_runtime_spawn_base.value_or(
+      std::numeric_limits<std::size_t>::max());
+}
+
 std::size_t AppendSpawnedObject(skate::world::SkateObjectAsset asset,
     skate::world::Vec3 map_position) {
   skate::world::MapDefinition& definition = ActiveWorld().MutableDefinition();
+  if (!g_runtime_spawn_base.has_value()) {
+    g_runtime_spawn_base = definition.editable_objects.size();
+  }
   skate::world::RemapSkateObjectBreakGroups(asset, definition);
 
   skate::world::TextureId next_texture = 1;

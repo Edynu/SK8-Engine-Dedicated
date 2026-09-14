@@ -1,5 +1,12 @@
 #pragma once
 
+// Steam P2P has been removed as a transport - see skate3_steam_backend.cpp's
+// own comment. This header's shape is kept so skate3_multiplayer.cpp,
+// skate3_multiplayer_session.cpp and skate3_app_common.cpp need no changes:
+// every symbol below now answers "Steam unavailable", a state all three
+// already handle. steam_api64.dll is never loaded - nothing in the .cpp
+// backing this names it.
+
 #include <cstddef>
 #include <cstdint>
 #include <string>

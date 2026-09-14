@@ -13,8 +13,14 @@
 !/tools/skate3_ui_extract/
 !/tools/skate3_ui_extract/**
 /tools/skate3_ui_extract/capture_menu_audio_telemetry.py
+!/tools/relay/
+!/tools/relay/**
 **/__pycache__/
 *.pyc
+
+# Dev web console (React/Tailwind/TS) build artifacts - see web-console/README.md
+/web-console/node_modules/
+/web-console/dist/
 
 # Local game dump and retail media. Users must provide their own copy.
 /game/

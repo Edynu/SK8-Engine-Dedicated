@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>NuiTest</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<!--
+  Hidden until the script says otherwise. NUI pages are always loaded, so a
+  page that draws on sight would sit on top of the game from the moment the
+  resource starts.
+
+  Everything interactive here is a real <button>: that is what makes the
+  page navigable with a controller for free - the D-pad drives arrow keys,
+  Y is Tab, and A clicks whatever the pointer is over (or presses the
+  focused element when the script asked for focus without a cursor).
+-->
+<div id="root" hidden>
+  <div id="panel">
+    <header>
+      <h1>NUI test</h1>
+      <p id="who">not connected</p>
+    </header>
+
+    <p id="mode-note"></p>
+
+    <div class="row">
+      <button id="where" type="button">Where am I?</button>
+      <button id="spawn" type="button">Teleport to origin</button>
+    </div>
+    <div class="row">
+      <button id="close" type="button">Close</button>
+    </div>
+
+    <pre id="log" aria-live="polite"></pre>
+
+    <footer>
+      <span><b>Left stick</b> pointer</span>
+      <span><b>A</b> click</span>
+      <span><b>D-pad</b> arrows</span>
+      <span><b>Y</b> tab</span>
+      <span><b>B</b> escape</span>
+      <span><b>Right stick</b> scroll</span>
+    </footer>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

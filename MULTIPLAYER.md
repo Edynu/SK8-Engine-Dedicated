@@ -34,6 +34,53 @@ monitor the live service state so a later disconnect degrades safely. Same-PC
 discovery remains an explicit development/test mode rather than an automatic
 user-facing fallback.
 
+## Dedicated relay (Direct Connect)
+
+A small standalone relay executable, `skate3_dedicated`, lets two ordinary,
+separately-installed copies of the game find each other by address instead of
+requiring Steam or a same-PC test session. It is **not authoritative** - it
+only forwards player position/animation/appearance traffic between clients
+that are on the same map; it never simulates gameplay, collision, or scoring.
+
+Run it once, anywhere reachable on your network:
+
+```powershell
+.\skate3_dedicated.exe --port=27200
+```
+
+Optional flags: `--token=<value>` requires clients to supply a matching
+shared token (empty, the default, accepts any client - fine for a home LAN);
+`--radius=<units>` limits replication to peers within that many map units of
+each other (0, the default, replicates every peer on the same map regardless
+of distance).
+
+Then, in each normal game client, open **Escape → Multiplayer → Direct
+Connect**, enter the relay's `host:port` (and token, if the relay requires
+one), and press **Connect**. There is no separate "host" step for this mode -
+every client that connects is assigned a role by the relay itself. Leaving
+uses the same **Leave Game** control as any other session.
+
+Vanilla Mode (the original retail University map) replicates too. Position
+capture and the remote-player draw path used to live entirely inside the
+owned-world sandbox draw function, which Vanilla Mode disables
+(`skate3_mechanics_sandbox=false`) to hand world/collision authority back to
+the retail renderer - that function now runs its multiplayer tick and
+remote-item population unconditionally, gating only the sandbox-specific
+geometry drawing, so Steam, the same-PC test transport, and Direct Connect
+all replicate correctly regardless of which world mode is active. Vanilla
+Mode sessions use a fixed `vanilla:university` map identity (distinct from
+any owned-map package hash) so Vanilla-Mode peers pair with each other and
+never mix with an unrelated custom-map session on the same relay.
+
+The relay authenticates each connection's role/session from packet metadata
+and forwards realtime traffic unchanged; it never decodes pose, animation, or
+appearance payloads. Interest management (same map, and optionally within
+`--radius`) is driven by a small periodic presence beacon each client sends
+directly to the relay, not by reading the replicated pose stream. This mode
+currently negotiates protocol v11 only (the same wire format the same-PC test
+transport uses); the v12 negotiated stream stays reserved for Steam and the
+configured local mesh.
+
 ## Live map editing and object drops
 
 The live map editor and object dropper replicate in real time for negotiated
@@ -434,13 +481,15 @@ therefore be introduced behind the same contract when dedicated/listen
 connections are deployed; changing packet schemas or interpolation is not
 required.
 
-The future visual relay router is also transport-neutral. It authenticates a
-connection's role and process session from envelope metadata and forwards the
-original immutable datagram to every other role (or one directed control
-target). It never reads retail meshes, textures, skeletons, or pose values.
-Synthetic tests exercise this fan-out at 2, 5, 20, 50, and 100 players and
-reject unknown connections, role spoofing, stale sessions, invalid targets,
-and role-reuse leakage.
+The visual relay router (`VisualRelayRouter`, shipped standalone as
+`skate3_dedicated` - see "Dedicated relay" above) is also transport-neutral.
+It authenticates a connection's role and process session from envelope
+metadata and forwards the original immutable datagram to every other role on
+the same map (optionally within a configured radius), or to one directed
+control target. It never reads retail meshes, textures, skeletons, or pose
+values. Synthetic tests exercise this fan-out at 2, 5, 20, 50, and 100 players
+and reject unknown connections, role spoofing, stale sessions, invalid
+targets, and role-reuse leakage.
 
 Run the non-game protocol, impairment, lifecycle, worker, routing, and
 full-pose scale suites repeatedly with:

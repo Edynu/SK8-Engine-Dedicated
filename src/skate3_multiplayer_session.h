@@ -68,6 +68,15 @@ SessionSnapshot RefreshServerBrowser(const std::string& active_map);
 bool HostSession(const HostSettings& settings);
 bool JoinSession(const std::string& server_id, const std::string& password,
                  const std::string& active_map);
+// Non-authoritative "Direct Connect": talks to a standalone relay process
+// (skate3_dedicated) at address ("host:port") instead of Steam or the
+// same-PC test registry. token is an optional shared secret the relay may
+// require; empty means the relay accepts any client (typical for a home
+// LAN). Unlike HostSession/JoinSession there is no separate host role -
+// the relay assigns every connecting client a role. Role assignment
+// happens asynchronously after this returns; see SessionSnapshot.status.
+bool ConnectDedicated(const std::string& address, const std::string& token,
+                      const std::string& active_map);
 void LeaveSession();
 void ShutdownSessions();
 

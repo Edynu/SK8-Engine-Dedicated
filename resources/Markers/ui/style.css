@@ -1,0 +1,173 @@
+/* The page is a full-screen overlay that must never eat input: markers are
+   positioned by the engine's projection, and the skater keeps playing
+   underneath. pointer-events is off everywhere for that reason. */
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* hidden must actually hide.
+   The `hidden` attribute works through the UA stylesheet's
+   [hidden] { display: none }, and ANY author rule that sets `display` beats
+   it - author rules outrank the UA sheet whatever the specificity. Every
+   flex/grid container below is toggled with el.hidden, so without this the
+   menu overlay rendered from page load and no amount of setting .hidden
+   would put it away. */
+[hidden] { display: none !important; }
+
+#layer { position: absolute; inset: 0; }
+
+/* Each marker is absolutely placed and centred on its projected point, so
+   the transform - not the left/top - carries the centring. */
+.marker {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: #fff;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.9);
+  will-change: transform, left, top;
+}
+
+.glyph {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  font-size: 15px;
+  line-height: 1;
+  background: rgba(12, 14, 18, 0.72);
+  border: 2px solid rgba(255, 255, 255, 0.55);
+}
+
+/* Distant markers shrink and dim rather than disappearing, so a marker
+   reads as a destination before it reads as interactive. */
+.marker.far .glyph { transform: scale(0.72); opacity: 0.55; }
+.marker.far .name { opacity: 0.55; font-size: 11px; }
+.marker.near .glyph {
+  border-color: #ffd54a;
+  background: rgba(28, 22, 6, 0.85);
+}
+
+.name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+/* The hold prompt: only the active marker gets one. */
+.prompt {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 9px 4px 5px;
+  border-radius: 6px;
+  background: rgba(12, 14, 18, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  font-size: 12px;
+  font-weight: 600;
+  position: relative;
+  overflow: hidden;
+}
+
+/* The D-pad-up key cap. */
+.dpad {
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 4px;
+  background: #ffd54a;
+  color: #1b1200;
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* Hold progress fills the prompt from the left. Width is set inline from
+   the engine's own hold timer rather than animated by CSS, so what the bar
+   shows is the hold that will actually fire. */
+.fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(255, 213, 74, 0.3);
+  width: 0;
+}
+
+.prompt > span, .prompt > .dpad { position: relative; }
+
+/* ---------------------------------------------------------------- radar */
+
+/* Bottom-left, clear of the trick/score text retail draws bottom-right. */
+#radar {
+  position: absolute;
+  left: 26px;
+  bottom: 26px;
+  width: 132px;
+  height: 132px;
+}
+
+#radar .ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(8, 10, 14, 0.5);
+  border: 2px solid rgba(255, 255, 255, 0.22);
+}
+
+/* The view cone: a wedge pointing up, so "up on the radar" reads as
+   "in front of the camera" without needing a compass. */
+#radar .cone {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  border-left: 30px solid transparent;
+  border-right: 30px solid transparent;
+  border-bottom: 58px solid rgba(255, 255, 255, 0.09);
+  transform: translate(-50%, -100%);
+}
+
+#radar .self {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 5px rgba(0, 0, 0, 0.8);
+}
+
+#blips { position: absolute; inset: 0; }
+
+.blip {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  margin: -4.5px 0 0 -4.5px;
+  border-radius: 50%;
+  background: #ffd54a;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+}
+
+/* A blip inside activation range pulses, so the radar and the world prompt
+   agree about which marker you can act on. */
+.blip.near { background: #fff3c4; animation: blip-pulse 1s ease-in-out infinite; }
+
+@keyframes blip-pulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.45); }
+}

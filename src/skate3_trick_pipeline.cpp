@@ -1,3 +1,6 @@
+#include "skate3_demo_path.h"
+#include "skate3_flash_bridge.h"
+#include "skate3_retail_ui_hooks.h"
 #include "skate3_trick_pipeline.h"
 
 #include "skate3_mechanics_sandbox.h"
@@ -23,6 +26,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <iomanip>
 #include <map>
 #include <mutex>
@@ -444,6 +448,59 @@ std::atomic<uint64_t> g_board_state_sample_count{0};
 std::atomic<uint64_t> g_board_state_offboard_count{0};
 std::atomic<uint32_t> g_board_state_last_packed{0xFFFFFFFFu};
 std::atomic<uint64_t> g_board_state_last_frame{0};
+// retail's own ground predicate, as handed to ObserveLocalBoardState. Kept
+// separately from the packed provider bytes because it is a different
+// question: a skater can be on the ground and offboard (walking) or in the
+// air and still on the board (an ollie).
+std::atomic<bool> g_board_state_on_ground{false};
+std::atomic<bool> g_board_state_seen{false};
+
+// The guest memory base, remembered from the hooks that carry it.
+//
+// Needed because the trick-name lookup is exposed to scripts, which call it
+// from the frame loop rather than from inside a recompiled function, and
+// nothing in that path has a base pointer to hand. Reading it is only valid
+// once a hook has actually run - hence the null return rather than a
+// fabricated base, and the accessors above returning empty for it.
+std::atomic<uint8_t *> g_guest_base{nullptr};
+
+void RememberGuestBase(uint8_t *base) {
+  if (base) {
+    g_guest_base.store(base, std::memory_order_release);
+  }
+}
+
+uint8_t *GuestBase() { return g_guest_base.load(std::memory_order_acquire); }
+
+// Landed/bailed tricks waiting to be published as script events. Bounded
+// because it is filled from the game's own score-holder callbacks and drained
+// once per rendered frame: if scripts ever stop draining, dropping the oldest
+// is the only honest option - an unbounded queue would grow until the process
+// died and a silently-truncated one would report a stale trick as current.
+constexpr size_t kMaximumPendingTrickEvents = 64;
+std::mutex g_trick_event_mutex;
+std::deque<TrickEventRecord> g_pending_trick_events;
+uint64_t g_dropped_trick_events = 0;
+
+void PushTrickEvent(TrickEventRecord record) {
+  std::lock_guard<std::mutex> lock(g_trick_event_mutex);
+  if (g_pending_trick_events.size() >= kMaximumPendingTrickEvents) {
+    g_pending_trick_events.pop_front();
+    ++g_dropped_trick_events;
+  }
+  g_pending_trick_events.push_back(std::move(record));
+}
+
+// Derived board velocity - see CurrentLocalBoardVelocity. Guarded by its own
+// tiny lock rather than atomics: it is three floats plus a timestamp that
+// must be updated together, and a torn read would produce a nonsense speed.
+std::mutex g_board_velocity_mutex;
+bool g_board_velocity_valid = false;
+bool g_board_velocity_has_previous = false;
+float g_board_velocity[3] = {0.0f, 0.0f, 0.0f};
+float g_board_speed = 0.0f;
+float g_board_previous_position[3] = {0.0f, 0.0f, 0.0f};
+uint64_t g_board_previous_time_us = 0;
 std::atomic<uint32_t> g_andale_database_manager{0};
 std::atomic<uint32_t> g_andale_database_allocator{0};
 std::atomic<uint32_t> g_andale_database_slot{0};
@@ -3545,6 +3602,145 @@ bool CurrentLocalBoardPosition(float out_position[3]) {
          std::isfinite(out_position[2]);
 }
 
+std::string ScorableNameForId(uint8_t *base, uint32_t id, bool &out_trusted) {
+  out_trusted = false;
+  if (!base || id >= trick::ScorableMetadataTableLayout::kEntryCount) {
+    return {};
+  }
+  const uint32_t entry = trick::ScorableMetadataTableLayout::EntryAddress(id);
+  // The table is indexed by EScorableID and ALSO stores that id at +0. They
+  // must agree: if they do not, the layout constant is wrong and every name
+  // read out of here is off by some stride. Reporting the name as untrusted
+  // is the difference between a known-bad reading and a plausible lie.
+  const uint32_t self_id =
+      LoadU32(base, entry + trick::ScorableMetadataTableLayout::kId);
+  const uint32_t name_pointer =
+      LoadU32(base, entry + trick::ScorableMetadataTableLayout::kName);
+  std::string name = LoadToken(base, name_pointer);
+  out_trusted = self_id == id && !name.empty();
+  return name;
+}
+
+uint32_t ScorablePatternClassForId(uint8_t *base, uint32_t id) {
+  if (!base || id >= trick::ScorableMetadataTableLayout::kEntryCount) {
+    return static_cast<uint32_t>(trick::TrickPatternClass::None);
+  }
+  return LoadU32(base, trick::ScorableMetadataTableLayout::EntryAddress(id) +
+                           trick::ScorableMetadataTableLayout::kPatternClass);
+}
+
+std::string ScorableTrickName(uint32_t id, bool &out_trusted) {
+  return ScorableNameForId(GuestBase(), id, out_trusted);
+}
+
+uint32_t ScorableTrickPatternClass(uint32_t id) {
+  return ScorablePatternClassForId(GuestBase(), id);
+}
+
+std::vector<TrickEventRecord> DrainTrickEvents(uint64_t &out_dropped) {
+  std::lock_guard<std::mutex> lock(g_trick_event_mutex);
+  std::vector<TrickEventRecord> drained(
+      std::make_move_iterator(g_pending_trick_events.begin()),
+      std::make_move_iterator(g_pending_trick_events.end()));
+  g_pending_trick_events.clear();
+  out_dropped += g_dropped_trick_events;
+  g_dropped_trick_events = 0;
+  return drained;
+}
+
+bool CurrentLocalBoardState(bool &offboard, bool &air_offboard,
+                            bool &on_ground) {
+  if (!g_board_state_seen.load(std::memory_order_acquire)) {
+    return false;
+  }
+  const uint32_t packed =
+      g_board_state_last_packed.load(std::memory_order_acquire);
+  if (packed == 0xFFFFFFFFu) {
+    return false;  // armed but never sampled.
+  }
+  const bool flag_673 = (packed & 1u) != 0;
+  const bool flag_675 = (packed & 4u) != 0;
+  offboard = flag_673 || flag_675;
+  air_offboard = (packed & 2u) != 0;
+  on_ground = g_board_state_on_ground.load(std::memory_order_relaxed);
+  return true;
+}
+
+// Called once per sampled board position to difference it against the
+// previous one.
+void UpdateBoardVelocity(const float position[3], uint64_t sample_time_us) {
+  std::lock_guard<std::mutex> lock(g_board_velocity_mutex);
+  if (!g_board_velocity_has_previous || sample_time_us <= g_board_previous_time_us) {
+    g_board_velocity_has_previous = true;
+    g_board_previous_position[0] = position[0];
+    g_board_previous_position[1] = position[1];
+    g_board_previous_position[2] = position[2];
+    g_board_previous_time_us = sample_time_us;
+    return;
+  }
+  const uint64_t elapsed_us = sample_time_us - g_board_previous_time_us;
+  // Ignore samples closer together than a millisecond: the division blows
+  // up the quantisation noise in the position far more than it reveals any
+  // real motion.
+  if (elapsed_us < 1000) {
+    return;
+  }
+  const float elapsed = static_cast<float>(elapsed_us) / 1'000'000.0f;
+  float instantaneous[3];
+  for (int axis = 0; axis < 3; ++axis) {
+    instantaneous[axis] =
+        (position[axis] - g_board_previous_position[axis]) / elapsed;
+    g_board_previous_position[axis] = position[axis];
+  }
+  g_board_previous_time_us = sample_time_us;
+
+  // A teleport is not motion. Anything above this is a reposition, and
+  // feeding it into the filter would leave a huge phantom speed decaying
+  // for a second afterwards.
+  constexpr float kImplausibleSpeed = 500.0f;
+  const float magnitude =
+      std::sqrt(instantaneous[0] * instantaneous[0] +
+                instantaneous[1] * instantaneous[1] +
+                instantaneous[2] * instantaneous[2]);
+  if (magnitude > kImplausibleSpeed) {
+    g_board_velocity[0] = 0.0f;
+    g_board_velocity[1] = 0.0f;
+    g_board_velocity[2] = 0.0f;
+    g_board_speed = 0.0f;
+    g_board_velocity_valid = false;
+    return;
+  }
+
+  // Exponential smoothing. 0.35 settles within a few frames while taking
+  // most of the jitter out of a constant glide.
+  constexpr float kSmoothing = 0.35f;
+  for (int axis = 0; axis < 3; ++axis) {
+    g_board_velocity[axis] = g_board_velocity_valid
+                                 ? g_board_velocity[axis] +
+                                       kSmoothing * (instantaneous[axis] -
+                                                     g_board_velocity[axis])
+                                 : instantaneous[axis];
+  }
+  g_board_speed = std::sqrt(g_board_velocity[0] * g_board_velocity[0] +
+                            g_board_velocity[1] * g_board_velocity[1] +
+                            g_board_velocity[2] * g_board_velocity[2]);
+  g_board_velocity_valid = true;
+}
+
+bool CurrentLocalBoardVelocity(float out_velocity[3], float &out_speed) {
+  std::lock_guard<std::mutex> lock(g_board_velocity_mutex);
+  if (!g_board_velocity_valid) {
+    return false;
+  }
+  if (out_velocity != nullptr) {
+    out_velocity[0] = g_board_velocity[0];
+    out_velocity[1] = g_board_velocity[1];
+    out_velocity[2] = g_board_velocity[2];
+  }
+  out_speed = g_board_speed;
+  return true;
+}
+
 bool CurrentLiveSpatialSnapshot(LiveSpatialSnapshot &out) {
   for (int attempt = 0; attempt < 8; ++attempt) {
     const uint64_t revision_before =
@@ -3607,9 +3803,22 @@ OwnedWorldCollisionBridgeScope::OwnedWorldCollisionBridgeScope(
 OwnedWorldCollisionBridgeScope::~OwnedWorldCollisionBridgeScope() {
   mechanics_sandbox::ApplyOwnedWorldCollisionAfterPhysOut(
       ctx_, base_, controller_, phys_out_);
+  // Applied after the ground-snap correction above so a same-tick teleport
+  // request always wins.
+  mechanics_sandbox::ApplyPendingTeleportAfterPhysOut(ctx_, base_, controller_,
+                                                      phys_out_);
 }
 
 void ObserveLocalSkateboardSpatialState(PPCContext &ctx, uint8_t *base) {
+  // Borrowed boundary: this runs every physics tick on the guest CPU thread
+  // with a live context, which is what calling into retail needs and what a
+  // script thread cannot provide. Nothing here depends on the skateboard
+  // state, so it runs before the early-outs below.
+  flash_bridge::ApplyPending(ctx, base);
+  retail_ui::ApplyPendingDifficulty(ctx, base);
+  retail_ui::ApplyPendingGameMode(base);
+  retail_ui::ApplyPendingFrontEndState(ctx, base);
+
   const uint32_t controller = ctx.r3.u32;
   const uint32_t phys_out = ctx.r4.u32;
   if (!base || !controller || !phys_out) {
@@ -3668,6 +3877,20 @@ void ObserveLocalSkateboardSpatialState(PPCContext &ctx, uint8_t *base) {
   g_local_spatial_frame.store(frame, std::memory_order_relaxed);
   g_local_spatial_revision.fetch_add(
       1, std::memory_order_release);
+
+  // Differentiate the position we just committed - see
+  // CurrentLocalBoardVelocity. Done here rather than on demand so the
+  // interval between samples is the engine's own, not however often a
+  // script happens to ask.
+  {
+    const float position[3] = {std::bit_cast<float>(position_x_bits),
+                               std::bit_cast<float>(position_y_bits),
+                               std::bit_cast<float>(position_z_bits)};
+    if (std::isfinite(position[0]) && std::isfinite(position[1]) &&
+        std::isfinite(position[2])) {
+      UpdateBoardVelocity(position, sample_time_us);
+    }
+  }
 
   if (!g_focused.load(std::memory_order_acquire)) {
     return;
@@ -3807,6 +4030,54 @@ ScoreCollectorTransitionObservationScope::
   }
 }
 
+// Both score-holder callbacks take (ScoreHolder*, Scorable*) and are the
+// game's own decision that a trick did or did not count, which is why they
+// are the publication point rather than any of the air-collector hooks: the
+// collector sees a trick being assembled and can still change its mind.
+//
+// Deliberately NOT gated on BeginEvent/focus like the research observers
+// below it: those exist to keep a bounded diagnostic trace and stop
+// recording once it is full, whereas a game mode must never miss the trick
+// that decided a round.
+void CaptureTrickEvent(PPCContext &ctx, uint8_t *base, bool landed) {
+  const uint32_t holder = ctx.r3.u32;
+  const uint32_t scorable = ctx.r4.u32;
+  RememberGuestBase(base);
+  if (!scorable) {
+    return;
+  }
+  // ONLY the local player's tricks. The score holder is per-skater and this
+  // callback fires for every one of them - the ambient skaters populating a
+  // free-skate session land tricks constantly, and without this a game mode
+  // would score whatever happened to be skating past.
+  //
+  // g_local_score_holder is the holder reached from the PhysOut already
+  // proven to be the local player's (see ObserveScoreModuleUpdate), so this
+  // is retail's own ownership rather than a guess. Zero means ownership has
+  // not been resolved yet, and nothing is published then: publishing a
+  // trick that MIGHT be the local player's is worse for adjudication than
+  // publishing none.
+  if (!holder ||
+      holder != g_local_score_holder.load(std::memory_order_acquire)) {
+    return;
+  }
+  TrickEventRecord record;
+  record.frame = input_history_watch::CurrentFrameSequence();
+  record.score_holder = holder;
+  record.scorable = scorable;
+  record.scorable_id = LoadU32(base, scorable + trick::ScorableLayout::kId);
+  record.pattern_class = ScorablePatternClassForId(base, record.scorable_id);
+  record.value = std::bit_cast<float>(
+      LoadU32(base, scorable + trick::ScorableLayout::kValue));
+  record.landed = landed;
+  record.name =
+      ScorableNameForId(base, record.scorable_id, record.name_trusted);
+  if (!std::isfinite(record.value)) {
+    record.value = 0.0f;
+  }
+  PushTrickEvent(std::move(record));
+}
+
 void ObserveAirTrickAnalysis(PPCContext &ctx, uint8_t *base) {
   ObserveSimpleCollector(EventKind::AirAnalysis, "AA", ctx, base);
 }
@@ -3847,6 +4118,7 @@ void ObserveScoreHolderRecordTrick(PPCContext &ctx, uint8_t *base) {
   custom_trick::ObserveScoreHolderRecord(
       input_history_watch::CurrentFrameSequence(), base, ctx.r3.u32,
       ctx.r4.u32);
+  CaptureTrickEvent(ctx, base, /*landed=*/true);
   if (!BeginEvent(EventKind::ScoreHolderRecord)) {
     return;
   }
@@ -3873,6 +4145,7 @@ void ObserveScoreHolderCancelTrick(PPCContext &ctx, uint8_t *base) {
   custom_trick::ObserveScoreHolderCancel(
       input_history_watch::CurrentFrameSequence(), base, ctx.r3.u32,
       ctx.r4.u32);
+  CaptureTrickEvent(ctx, base, /*landed=*/false);
   if (!BeginEvent(EventKind::ScoreHolderCancel)) {
     return;
   }
@@ -5225,6 +5498,7 @@ void SetFocus(bool focused) {
 
 void ObserveLocalBoardState(uint64_t frame, uint8_t *base, uint32_t entity,
                             bool on_ground) {
+  RememberGuestBase(base);
   const uint32_t provider =
       g_is_offboard_condition_last_provider.load(std::memory_order_acquire);
   if (!base || !provider) {
@@ -5236,6 +5510,8 @@ void ObserveLocalBoardState(uint64_t frame, uint8_t *base, uint32_t entity,
   const bool offboard = flag_673 || flag_675;
   const uint32_t packed =
       (flag_673 ? 1u : 0u) | (air_offboard ? 2u : 0u) | (flag_675 ? 4u : 0u);
+  g_board_state_on_ground.store(on_ground, std::memory_order_relaxed);
+  g_board_state_seen.store(true, std::memory_order_release);
   g_board_state_sample_count.fetch_add(1, std::memory_order_relaxed);
   if (offboard) {
     g_board_state_offboard_count.fetch_add(1, std::memory_order_relaxed);

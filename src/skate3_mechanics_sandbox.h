@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <iosfwd>
+#include <vector>
 
 struct PPCContext;
 
@@ -63,6 +64,7 @@ uint32_t LocalPresentationEntity();
 // (the verified PhysOut), this value is directly comparable with
 // native_entity::CtxInfo::entity.
 uint32_t LocalPresentationCandidate();
+
 // Wardrobe changes replace the local PresentationEntity. The renderer's
 // verified view-removal seam clears only the exact current candidate so the
 // next rendered skater entity can become the new local capture owner.
@@ -87,6 +89,53 @@ void RecordMapContact(bool hit, uint32_t id, const float normal[3],
 void ApplyOwnedWorldCollisionAfterPhysOut(PPCContext& ctx, uint8_t* base,
                                           uint32_t controller,
                                           uint32_t phys_out);
+
+// The local player's position-verified SkaterPresEntity (see
+// UpdateLocalSkaterEntityIdentity in the .cpp), or 0 before a lock is
+// established. Distinct from LocalPresentationCandidate: that is an
+// order-of-first-sight heuristic that can latch onto another skater/NPC;
+// this is continuously re-derived from a sustained position match against
+// the verified local SkateboardController.
+uint32_t LocalSkaterPresEntity();
+
+// Teleports the local player to an arbitrary world position by posting the
+// engine's OWN cMsgTeleport onto its message queue - the same queue
+// SetSessionMarker posts to - rather than patching physics memory. The
+// destination inherits the player's current orientation. Callable from any
+// thread; posted from the guest thread at the next FillPhysOut boundary.
+void RequestMessageTeleport(float x, float y, float z);
+
+// The human skater's Physics::Skeleton (SkateboardController+432), or 0
+// before gameplay. This is the rider's actual physics body - the object
+// that owns the position the visible character is drawn at - as opposed to
+// the Skateboard at +428 that entity 0 currently teleports.
+uint32_t LocalSkaterSkeleton();
+
+// Requests the RETAIL "teleport local player to the session marker" path
+// (the game's own reposition code, reached the way its
+// TeleportLocalPlayerToSessionMarker script native does). Callable from any
+// thread; performed on the guest thread at the next FillPhysOut boundary.
+// Unlike RequestLocalPlayerTeleport below this moves the whole character,
+// not just the board - but only to wherever the session marker already is.
+void RequestSessionMarkerTeleport();
+
+// Requests a teleport of the local player's board to the given world
+// position (orientation preserved). Callable from any thread - applied on
+// the guest CPU thread starting the next time the local player's
+// FillPhysOut hook runs, and re-applied for a short window of subsequent
+// ticks (see kTeleportHoldTicks in the .cpp) because a single write does
+// not survive retail's own per-tick transform recomputation. Entity handle
+// 0 (the only entity Lua's SetEntityPosition native currently supports)
+// always means "local player".
+void RequestLocalPlayerTeleport(float x, float y, float z);
+
+// Runs after the verified SkateboardController::FillPhysOut call, applying
+// any pending RequestLocalPlayerTeleport for this exact phys_out. Must run
+// after ApplyOwnedWorldCollisionAfterPhysOut so a same-tick teleport always
+// wins over an owned-world ground-snap correction.
+void ApplyPendingTeleportAfterPhysOut(PPCContext& ctx, uint8_t* base,
+                                      uint32_t controller,
+                                      uint32_t phys_out);
 
 // Native-scene presentation policy. The scene renderer remains the only
 // consumer; no generated guest update or mechanics path is disabled here.

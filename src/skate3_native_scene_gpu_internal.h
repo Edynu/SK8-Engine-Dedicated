@@ -554,6 +554,37 @@ struct RendererState {
   nrhi::TextureView* menu_blur_srv[2] = {nullptr, nullptr};
   uint32_t menu_blur_w = 0;
   uint32_t menu_blur_h = 0;
+  // CEF overlays (the F7 dev console and the NUI layer): CEF's OSR paint
+  // buffer uploaded into a texture and drawn as a full-screen triangle
+  // clipped to the overlay's own on-screen rect by the viewport (see
+  // DrawCefOverlay). Both overlays share ONE PSO - identical shader,
+  // identical blend - but keep separate textures, because they are
+  // different sizes and repaint independently of each other.
+  //
+  // tex_w/h record what the texture/upload buffer are CURRENTLY sized for,
+  // and EnsureCefOverlayTexture recreates them when that no longer matches:
+  // the console spans the full guest-output width and NUI spans all of it,
+  // so both track the game's own resolution. `upload` stays persistently
+  // mapped (upload_cpu), matching ui_ring's own pattern, since this updates
+  // far more often than a typical guest texture.
+  struct CefOverlayGpu {
+    nrhi::Texture* tex = nullptr;
+    nrhi::TextureView* srv = nullptr;
+    nrhi::Buffer* upload = nullptr;
+    uint8_t* upload_cpu = nullptr;
+    uint32_t upload_pitch = 0;
+    uint32_t tex_w = 0;
+    uint32_t tex_h = 0;
+    // The CEF paint serial currently sitting in `tex`. NUI is composited
+    // every frame but a static page repaints rarely, so this is what lets
+    // an unchanged frame skip the memcpy and the GPU copy and go straight
+    // to the draw. 0 means "nothing uploaded yet".
+    uint64_t uploaded_serial = 0;
+  };
+  nrhi::Pipeline* pso_cef_overlay = nullptr;
+  bool cef_overlay_pso_failed = false;
+  CefOverlayGpu dev_console_overlay;
+  CefOverlayGpu nui_overlay;
   // Native photo grab (photo_grab_native): the blur downsample pass (whose
   // 1152x640 blur space happens to BE the game's screenshot-target raster)
   // renders the finished frame into blur_tex[0], which is then copied into
@@ -1056,6 +1087,22 @@ struct RendererState {
   // and the draw-time fetch-word overrides (posters/ads). Render thread
   // only.
   std::unordered_map<uint64_t, GuestTexture> tex_store;
+  // Texture store keys owned by an installed REMOTE PLAYER appearance.
+  //
+  // These are exempt from the LRU eviction below, and must be: a world
+  // texture that ages out can always be decoded again from guest memory,
+  // whereas a remote appearance was assembled once from a network transfer
+  // and has no such source to go back to. Evicting one leaves that peer
+  // permanently untextured - white clothing that never recovers - and it
+  // happens for the most ordinary reason imaginable: the player skated
+  // off-camera for a few seconds, so nothing touched their textures and the
+  // idle scan took them.
+  //
+  // Kept here rather than read from g_remote_appearances because the
+  // eviction pass runs far earlier in the translation unit than that table
+  // is declared. Entries are added when an appearance is installed and
+  // removed when it is released.
+  std::unordered_set<uint64_t> remote_appearance_textures;
   // Texture object -> its last STABLE fetch-words state (seqlock
   // double-read at resolve). A route is a lookup aid, never an owner: the
   // game freely retargets objects (mip promote/demote, detail demote,
@@ -1071,6 +1118,19 @@ struct RendererState {
     // and payload polls are suspended while held (the probes would read
     // the reused pool). A re-promote publishes fresh words and re-routes.
     bool demoted = false;
+    // Owned by an installed REMOTE PLAYER appearance, and therefore never
+    // re-derived from the guest texture object this route is keyed by.
+    //
+    // The install points a guest object at a decode of its own - bytes that
+    // came off the network - so the live fetch words at that address are not
+    // this texture's source. The draw-time refresh below re-reads those
+    // words every frame and REROUTES whenever they differ, which for an
+    // appearance means swapping a perfectly good decode for a key derived
+    // from unrelated guest memory: the peer turns white, and stays white.
+    // It survives at first only because the object reads as demoted (the
+    // route is held), and fails the moment streaming writes a real base
+    // address there - which is why it looked like an LOD or distance bug.
+    bool appearance = false;
   };
   std::unordered_map<uint32_t, TexRoute> tex_routes;
   // Sticky texture serving (see resolve_texture in draw_item): the last
@@ -1115,6 +1175,22 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context);
 bool EnsureResolvePso(const NativeGuestOutputRenderContext& context);
 bool EnsureBlurPsos(const NativeGuestOutputRenderContext& context);
 bool EnsureOutlineEdgePso(const NativeGuestOutputRenderContext& context);
+bool EnsureCefOverlayPso(const NativeGuestOutputRenderContext& context);
+// Lua dev console (F7) overlay: draws the CEF OSR texture into
+// context.guest_output at its fixed on-screen rect. No-op when the console
+// is hidden (g_dev_console_visible) or the shared overlay PSO failed to
+// build. Matches ApplyMenuBlurPass's output_in_guest_output_state
+// convention: pass true from the emulated-post-processor call site
+// (context.guest_output enters in kGuestOutput state), false from the
+// native RenderScene call site (already kRenderTarget there).
+void DrawDevConsoleOverlay(const NativeGuestOutputRenderContext& context,
+                           nrhi::Cmd* cmd, bool output_in_guest_output_state);
+// NUI overlay: the same composite, full-screen, for the browser hosting
+// resources' ui_pages. No-op when no resource has published a page
+// (g_nui_visible). Drawn AFTER the dev console at both call sites, so the
+// developer console always stays readable on top of game UI.
+void DrawNuiOverlay(const NativeGuestOutputRenderContext& context,
+                    nrhi::Cmd* cmd, bool output_in_guest_output_state);
 bool Ensure2dPso(const NativeGuestOutputRenderContext& context);
 bool EnsureSplinePsos(const NativeGuestOutputRenderContext& context);
 bool EnsureShadowPsos(const NativeGuestOutputRenderContext& context);

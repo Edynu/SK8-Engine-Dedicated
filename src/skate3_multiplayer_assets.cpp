@@ -703,11 +703,16 @@ bool ReadRecipeString(
       });
 }
 
+// `locations`, when non-null, receives one entry per MODEL RECORD (every LOD,
+// not just the presentation one) with the byte offsets of its ids. Threaded
+// through the existing parser on purpose: the offsets are only correct if they
+// come from the same walk that validates the structure.
 bool ParseRecipe(
     const std::vector<std::uint8_t>& bytes,
     std::vector<ParsedRecipePiece>& pieces,
     std::size_t& structural_bytes,
-    std::uint8_t& gender) {
+    std::uint8_t& gender,
+    std::vector<RecipeIdLocation>* locations = nullptr) {
   static constexpr std::array<std::uint8_t, 26> kHeader = {
       0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x06,
       'c',  'a',  's',  '_',  'd',  'b',  0x00, 0x00,
@@ -728,6 +733,9 @@ bool ParseRecipe(
     return false;
   }
   pieces.clear();
+  if (locations != nullptr) {
+    locations->clear();
+  }
   for (std::uint32_t list_index = 0;
        list_index < list_count; ++list_index) {
     std::string category;
@@ -746,6 +754,7 @@ bool ParseRecipe(
         return false;
       }
       const std::uint64_t asset_id = ReadBe64(bytes, cursor);
+      const std::size_t asset_id_offset = cursor;
       const std::uint32_t model_count =
           ReadBe32(bytes, cursor + 8);
       cursor += 12;
@@ -770,6 +779,18 @@ bool ParseRecipe(
         if (texture_loops == 0 || texture_loops > 8 ||
             texture_count > 32) {
           return false;
+        }
+        if (locations != nullptr) {
+          RecipeIdLocation location;
+          location.category = category;
+          location.lod = lod;
+          location.asset_id = asset_id;
+          location.model_id = model_id;
+          location.asset_id_offset = asset_id_offset;
+          // The model record started 37 bytes back: see the reads above.
+          location.model_id_offset = cursor - 37 + 9;
+          location.material_id_offset = cursor - 37 + 25;
+          locations->push_back(std::move(location));
         }
         ParsedRecipePiece parsed;
         parsed.category = category;
@@ -1188,6 +1209,42 @@ void StartLocalCatalogue(
 
 void ShutdownLocalCatalogue() {
   cac_catalogue::Stop();
+}
+
+bool LocateRecipeIds(
+    const std::vector<std::uint8_t>& recipe,
+    std::vector<RecipeIdLocation>& locations) {
+  locations.clear();
+  std::vector<ParsedRecipePiece> parsed;
+  std::size_t structural_bytes = 0;
+  std::uint8_t gender = 0;
+  return ParseRecipe(recipe, parsed, structural_bytes, gender, &locations) &&
+         !locations.empty();
+}
+
+// Public wrapper over the internal parser, so the wardrobe reader does not
+// need its own copy of the recipe format - one parser, one place for it to be
+// wrong.
+bool DescribeRecipe(
+    const std::vector<std::uint8_t>& recipe,
+    std::vector<RecipePieceInfo>& pieces) {
+  pieces.clear();
+  std::vector<ParsedRecipePiece> parsed;
+  std::size_t structural_bytes = 0;
+  std::uint8_t gender = 0;
+  if (!ParseRecipe(recipe, parsed, structural_bytes, gender)) {
+    return false;
+  }
+  pieces.reserve(parsed.size());
+  for (const ParsedRecipePiece& piece : parsed) {
+    RecipePieceInfo out;
+    out.category = piece.category;
+    out.asset_id = piece.asset_id;
+    out.model_id = piece.model_id;
+    out.material_id = piece.material_id;
+    pieces.push_back(std::move(out));
+  }
+  return true;
 }
 
 bool ResolveRecipeAppearance(

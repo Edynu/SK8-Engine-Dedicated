@@ -1,0 +1,132 @@
+/* NUI pages composite over the game, so the document itself must stay
+   transparent - anything opaque here would black out the frame. */
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: #e8eaed;
+  /* The page's own cursor is never seen (there is no OS cursor over the
+     guest output); the pointer is drawn by the NUI root document. Hiding
+     it here avoids a second cursor when a mouse IS in play. */
+  cursor: none;
+  user-select: none;
+}
+
+#root[hidden] { display: none; }
+
+#root {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#panel {
+  width: min(560px, 80vw);
+  padding: 28px 32px 22px;
+  border-radius: 14px;
+  background: rgba(12, 13, 17, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(14px);
+}
+
+/* HUD mode: out of the way, and click-through everywhere except the panel,
+   so gameplay underneath is unobstructed. */
+#root.hud {
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 24px;
+}
+#root.hud #panel { width: min(340px, 40vw); }
+
+h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+#who {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: #8b90a0;
+}
+
+#mode-note {
+  margin: 16px 0 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #a6abbb;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+button {
+  flex: 1;
+  padding: 11px 14px;
+  font: inherit;
+  font-size: 14px;
+  color: #e8eaed;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  cursor: none;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+button:hover {
+  background: rgba(255, 255, 255, 0.11);
+}
+
+/* The focus ring is not decoration here: with a controller it is the ONLY
+   indication of what A will press when there is no pointer on screen. */
+button:focus-visible,
+button:focus {
+  outline: none;
+  border-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.16);
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.32);
+}
+
+button:active {
+  background: rgba(56, 189, 248, 0.26);
+}
+
+#log {
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  min-height: 54px;
+  max-height: 130px;
+  overflow-y: auto;
+  font-family: Consolas, "SF Mono", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #9fd5b0;
+  background: rgba(0, 0, 0, 0.32);
+  border-radius: 8px;
+  white-space: pre-wrap;
+}
+
+footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 16px;
+  font-size: 11px;
+  color: #6d7383;
+}
+
+footer b {
+  color: #cfd3dd;
+  font-weight: 600;
+}

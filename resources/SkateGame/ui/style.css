@@ -1,0 +1,229 @@
+/* The page is a full-screen overlay. pointer-events default to none so the
+   scoreboard never eats a click meant for the game; only the trick menu
+   turns them back on, and only while it is open. */
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: #fff;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* hidden must actually hide.
+   The `hidden` attribute works through the UA stylesheet's
+   [hidden] { display: none }, and ANY author rule that sets `display` beats
+   it - author rules outrank the UA sheet whatever the specificity. Every
+   flex/grid container below is toggled with el.hidden, so without this the
+   menu overlay rendered from page load and no amount of setting .hidden
+   would put it away. */
+[hidden] { display: none !important; }
+
+/* ----------------------------------------------------------- area box */
+
+#area {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+#areaEdges line {
+  stroke: rgba(255, 213, 74, 0.55);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+#area.editing #areaEdges line {
+  stroke: rgba(120, 220, 255, 0.9);
+  stroke-dasharray: 6 5;
+}
+
+/* --------------------------------------------------------- scoreboard */
+
+#board {
+  position: absolute;
+  left: 20px;
+  top: 18px;
+  min-width: 260px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: rgba(10, 12, 16, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 13px;
+}
+
+.row .name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+/* The setter and the player on the clock are the two things a glance has to
+   answer, so they are marked differently from each other. */
+.row.attempting { color: #ffd54a; font-weight: 600; }
+.row.setter .name::after {
+  content: " (sets)";
+  opacity: 0.6;
+  font-weight: 400;
+  font-size: 11px;
+}
+.row.self .name { text-decoration: underline; text-underline-offset: 3px; }
+.row.out { opacity: 0.42; }
+.row.out .name { text-decoration: line-through; }
+
+/* S.K.A.T.E. - every letter is always present and the unearned ones are
+   dimmed, rather than appearing one at a time. A fixed-width word means a
+   player can see how close someone is without reading it. */
+.word {
+  display: flex;
+  gap: 3px;
+  font-family: "Consolas", ui-monospace, monospace;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.word span { opacity: 0.16; }
+.word span.got { opacity: 1; color: #ff6b6b; }
+
+#status {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#status .trick {
+  color: #ffd54a;
+  font-weight: 600;
+}
+
+#status .clock {
+  font-family: "Consolas", ui-monospace, monospace;
+}
+
+#status .turn {
+  color: #8fe36b;
+  font-weight: 600;
+}
+
+#log {
+  margin-top: 7px;
+  font-size: 11px;
+  opacity: 0.62;
+  line-height: 1.45;
+}
+
+/* -------------------------------------------------------------- toast */
+
+#toast {
+  position: absolute;
+  left: 50%;
+  top: 76px;
+  transform: translateX(-50%);
+  padding: 7px 14px;
+  border-radius: 6px;
+  background: rgba(180, 40, 40, 0.9);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------- trick menu */
+
+#menu {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+  /* The only element that accepts input, and only while it is up. */
+  pointer-events: auto;
+}
+
+.panel {
+  width: 420px;
+  max-height: 68vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  background: rgba(16, 18, 24, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  overflow: hidden;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 13px;
+  font-size: 14px;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.panel-head button {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  cursor: pointer;
+}
+
+#filter {
+  font: inherit;
+  font-size: 13px;
+  margin: 10px 13px 6px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+}
+
+#list {
+  overflow-y: auto;
+  padding: 4px 8px 10px;
+}
+
+.group {
+  padding: 9px 6px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  opacity: 0.5;
+}
+
+.trick {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+
+.trick:hover, .trick:focus { background: rgba(255, 213, 74, 0.18); outline: 0; }
+
+#list .empty { padding: 14px 8px; font-size: 12px; opacity: 0.6; }

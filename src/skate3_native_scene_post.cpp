@@ -2085,22 +2085,36 @@ void PostProcessGuestOutput(const NativeGuestOutputRenderContext& context, void*
         target, ensured, (void*)g_r.pso_menu_gauss, (void*)g_r.menu_blur_tex[0],
         (void*)g_r.output_srv_slot, g_r.failed);
   }
+  const bool console_visible =
+      g_dev_console_visible.load(std::memory_order_relaxed);
+  const bool nui_visible = g_nui_visible.load(std::memory_order_relaxed);
+  bool blur_active = false;
   if (!ensured) {
-    if (target <= 0.0f) {
-      rex::graphics::RequestNativeGuestOutputPostProcess(false);
-    }
-    return;
+    blur_active = false;
+  } else {
+    blur_active =
+        vanilla_backdrop
+            ? ApplyVanillaUiBackdropPass(
+                  context, context.cmd,
+                  /*output_in_guest_output_state=*/true)
+            : ApplyMenuBlurPass(context, context.cmd, target,
+                                /*output_in_guest_output_state=*/true);
   }
-  const bool active =
-      vanilla_backdrop
-          ? ApplyVanillaUiBackdropPass(
-                context, context.cmd,
-                /*output_in_guest_output_state=*/true)
-          : ApplyMenuBlurPass(context, context.cmd, target,
-                              /*output_in_guest_output_state=*/true);
-  if (!active) {
-    // Fully eased out: stop the per-frame post-process invocations until the
-    // menu opens again.
+  // Dev console draws on top, independent of whether the blur is
+  // active/ensured this frame - it enters/exits guest_output's state
+  // itself (output_in_guest_output_state=true), same as the blur passes
+  // above.
+  if (nui_visible) {
+    DrawNuiOverlay(context, context.cmd,
+                   /*output_in_guest_output_state=*/true);
+  }
+  if (console_visible) {
+    DrawDevConsoleOverlay(context, context.cmd,
+                          /*output_in_guest_output_state=*/true);
+  }
+  if (!blur_active && target <= 0.0f && !console_visible && !nui_visible) {
+    // Fully eased out, console closed and no NUI content: stop the
+    // per-frame post-process invocations until something re-arms it.
     rex::graphics::RequestNativeGuestOutputPostProcess(false);
   }
 }

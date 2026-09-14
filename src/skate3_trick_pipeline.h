@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iosfwd>
 #include <string>
+#include <vector>
 
 struct PPCContext;
 
@@ -1122,6 +1123,65 @@ bool CurrentLiveSpatialSnapshot(LiveSpatialSnapshot& out);
 // IsAirOffboard is byte 674.
 void ObserveLocalBoardState(uint64_t frame, uint8_t* base, uint32_t entity,
                             bool on_ground);
+
+// The local skater's board state, as retail itself computes it.
+//
+// `offboard` and `air_offboard` come straight from the provider bytes named
+// above; `on_ground` is the predicate retail passes into the same sampling
+// point. Returns false until a sample has been taken - which means "not in
+// gameplay yet", not "on the ground", and callers must not collapse the two.
+bool CurrentLocalBoardState(bool& offboard, bool& air_offboard,
+                            bool& on_ground);
+
+// One trick, as the game's own score holder recorded or cancelled it.
+//
+// `name` comes from the fixed EScorable metadata table, looked up by the id
+// the Scorable carries. `name_trusted` is false when that lookup could not
+// be corroborated (the table entry's self-id disagreed with the index, or
+// the string was empty) - a caller must not present an untrusted name as
+// the trick that was landed, because an off-by-one in the table stride
+// would otherwise read as a different, entirely plausible trick.
+struct TrickEventRecord {
+  uint64_t frame{};
+  // Guest addresses, retained only as identity for correlating events. They
+  // are not dereferenced after capture.
+  uint32_t score_holder{};
+  uint32_t scorable{};
+  uint32_t scorable_id{};
+  uint32_t pattern_class{};
+  float value{};
+  bool landed{};
+  bool name_trusted{};
+  std::string name;
+};
+
+// The name retail gives an EScorable id, from the fixed metadata table.
+// `out_trusted` is false when the table entry did not corroborate the
+// lookup (its self-id disagreed with the index, or the string was empty),
+// in which case the returned name must be treated as unknown rather than
+// as the trick it appears to name. Empty for an out-of-range id.
+std::string ScorableTrickName(uint32_t id, bool& out_trusted);
+
+// The trick's pattern class (TrickPatternClass), or None when unknown.
+uint32_t ScorableTrickPatternClass(uint32_t id);
+
+// Removes and returns everything captured since the last call. Safe from any
+// thread; intended to be drained once per frame by whatever publishes script
+// events. `out_dropped` accumulates the number of records the bounded queue
+// had to discard, so a caller can report loss rather than hide it.
+std::vector<TrickEventRecord> DrainTrickEvents(uint64_t& out_dropped);
+
+// Speed and velocity of the local board, in world units per second.
+//
+// DERIVED, not read from the game: it differentiates consecutive sampled
+// board positions. Retail surely keeps a velocity somewhere, but nothing has
+// located it, and differentiating a position we already sample every frame
+// is honest and accurate to within a frame of lag. Lightly smoothed, because
+// raw per-frame differences of a quantised position are noisy enough to make
+// a speed readout jitter by several units at a constant glide.
+//
+// Returns false before two samples exist to difference.
+bool CurrentLocalBoardVelocity(float out_velocity[3], float& out_speed);
 
 void ResetAndArm();
 void SetFocus(bool focused);

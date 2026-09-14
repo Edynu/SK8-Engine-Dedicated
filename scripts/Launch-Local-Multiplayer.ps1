@@ -5,7 +5,13 @@ param(
     [ValidateRange(2, 100)]
     [int]$Clients = 2,
     [string]$CacAssetRoot = '',
-    [switch]$NoDirectBoot
+    [switch]$NoDirectBoot,
+    # Retail single-player world content is suppressed by default here,
+    # because this script stages an ONLINE session: Skate 3's missions write
+    # progress into the player's save, and its AI skaters land tricks that a
+    # shared game mode has no way to attribute. Pass this to get the retail
+    # world back for comparison.
+    [switch]$KeepRetailContent
 )
 
 $ErrorActionPreference = 'Stop'
@@ -159,6 +165,32 @@ foreach ($role in 1..$Clients) {
     Copy-Item -LiteralPath $runtime -Destination (
         Join-Path $root 'rexruntime.dll'
     ) -Force
+    # The CEF runtime, if this build has one. skate3.exe IMPORTS libcef.dll,
+    # so a staged client without these files either refuses to start or comes
+    # up with no in-game UI at all - the dev console and every NUI page are
+    # CEF surfaces. Copied from beside the build output rather than from the
+    # SDK, so a client always gets the same CEF the exe was linked against.
+    $cefSource = Split-Path $executable -Parent
+    foreach ($cefFile in @(
+            'libcef.dll', 'chrome_elf.dll', 'd3dcompiler_47.dll',
+            'dxcompiler.dll', 'dxil.dll', 'libEGL.dll', 'libGLESv2.dll',
+            'v8_context_snapshot.bin', 'snapshot_blob.bin',
+            'vk_swiftshader.dll', 'vk_swiftshader_icd.json', 'vulkan-1.dll',
+            'icudtl.dat', 'chrome_100_percent.pak', 'chrome_200_percent.pak',
+            'resources.pak'
+        )) {
+        $from = Join-Path $cefSource $cefFile
+        if (Test-Path -LiteralPath $from -PathType Leaf) {
+            Copy-Item -LiteralPath $from -Destination (
+                Join-Path $root $cefFile
+            ) -Force
+        }
+    }
+    $localesSource = Join-Path $cefSource 'locales'
+    if (Test-Path -LiteralPath $localesSource -PathType Container) {
+        Copy-Item -LiteralPath $localesSource -Destination $root `
+            -Recurse -Force
+    }
     New-Item -ItemType File -Path (
         Join-Path $root 'portable.txt'
     ) -Force | Out-Null
@@ -195,6 +227,14 @@ foreach ($role in 1..$Clients) {
     if (-not $NoDirectBoot) {
         $arguments += '--skate3_direct_boot=true'
     }
+    if (-not $KeepRetailContent) {
+        # Both need to be set before the world loads, which a command-line
+        # flag is: they are marked as requiring a restart precisely because
+        # flipping them in the console mid-session does nothing for content
+        # that has already streamed in.
+        $arguments += '--skate3_no_retail_missions=true'
+        $arguments += '--skate3_no_ai_skaters=true'
+    }
     if (-not [string]::IsNullOrWhiteSpace($CacAssetRoot)) {
         $arguments += (
             '--skate3_multiplayer_cac_asset_root={0}' -f
@@ -207,6 +247,17 @@ foreach ($role in 1..$Clients) {
         Executable = Join-Path $root 'skate3.exe'
         Arguments = $arguments
     }
+}
+
+$cefStaged = Test-Path -LiteralPath (
+    Join-Path $stagedClients[0].Root 'libcef.dll'
+) -PathType Leaf
+if (-not $cefStaged) {
+    Write-Warning (
+        'No libcef.dll was staged: these clients will have no dev console ' +
+        'and no NUI. That is expected for a build configured without ' +
+        '-DSKATE3_ENABLE_CEF=ON, and a bug otherwise.'
+    )
 }
 
 foreach ($client in $stagedClients) {
@@ -231,3 +282,14 @@ if (-not [string]::IsNullOrWhiteSpace($CacAssetRoot)) {
     Write-Host "CAC bind assets: $CacAssetRoot"
 }
 Write-Host 'Remote collision is disabled.'
+if ($KeepRetailContent) {
+    Write-Host (
+        'Retail missions and AI skaters are ENABLED (-KeepRetailContent): ' +
+        'expect mission markers, and AI skater tricks in the world.'
+    )
+} else {
+    Write-Host (
+        'Retail missions and AI skaters are suppressed. Pass ' +
+        '-KeepRetailContent to restore them.'
+    )
+}

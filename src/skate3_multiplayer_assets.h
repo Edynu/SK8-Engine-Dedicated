@@ -85,6 +85,51 @@ enum class RecipeResolveStatus : std::uint8_t {
   kFailed,
 };
 
+// One piece of a parsed `cas_db` recipe: a category and the asset ids that
+// make it up. This is the recipe as DESCRIBED, with no asset resolution -
+// used by the wardrobe reader (skate3_clothing.h) to report what a skater is
+// wearing without touching the renderer's caches.
+// Named apart from RecipePiece above deliberately: that one is a RESOLVED
+// piece, carrying the mesh and textures the renderer bound. This one is only
+// what the recipe SAYS, so a reader cannot mistake unresolved zeros for a
+// piece that failed to load.
+struct RecipePieceInfo {
+  std::string category;
+  std::uint64_t asset_id = 0;
+  std::uint64_t model_id = 0;
+  std::uint64_t material_id = 0;
+};
+
+// Parses a recipe into its pieces. Returns false when the bytes are not a
+// valid recipe - the same strict header/structure check the appearance path
+// applies, so a caller can never see a half-read outfit.
+bool DescribeRecipe(
+    const std::vector<std::uint8_t>& recipe,
+    std::vector<RecipePieceInfo>& pieces);
+
+// Where a piece's ids SIT in the recipe bytes, so they can be rewritten in
+// place. Every model record is reported, including the lower LODs that
+// DescribeRecipe drops: a swapped item has to be swapped at every LOD, or the
+// skater changes clothes as the camera pulls back.
+//
+// Offsets are into the recipe passed in, and each id is 8 bytes big-endian.
+// Reported by the same parser that validates the format, rather than by a
+// second implementation that could drift from it - a wrong offset here writes
+// eight bytes into the middle of somebody's outfit.
+struct RecipeIdLocation {
+  std::string category;
+  std::uint8_t lod = 0;
+  std::uint64_t asset_id = 0;
+  std::uint64_t model_id = 0;
+  std::size_t asset_id_offset = 0;
+  std::size_t model_id_offset = 0;
+  std::size_t material_id_offset = 0;
+};
+
+bool LocateRecipeIds(
+    const std::vector<std::uint8_t>& recipe,
+    std::vector<RecipeIdLocation>& locations);
+
 // Strictly validates a live `cas_db` recipe and resolves its high-detail
 // model/texture IDs against the receiver's own extracted retail catalogue.
 // The recipe is network-safe metadata only; this routine never accepts paths

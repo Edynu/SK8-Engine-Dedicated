@@ -183,6 +183,19 @@ const char* ActiveMapPackagePath();
 std::size_t ActiveSurfaceCount();
 std::size_t ActiveRampCount();
 std::size_t ActiveEditableObjectCount();
+
+// Index of the first editable object that was spawned at RUNTIME rather than
+// loaded with the map package. The retail-map prop overlay draws only these:
+// the package's own objects belong to the owned base map, which is not drawn
+// over the retail world. Returns SIZE_MAX until the first runtime spawn.
+std::size_t RuntimeSpawnedObjectFirstIndex();
+
+// Per-prop render distance in world units; 0 means draw at any distance.
+// Culling is RENDER-only: a prop's collision stays registered once spawned,
+// because the native collision path registers incrementally and has no
+// removal. Set alongside the spawn.
+void SetRuntimePropLodDistance(std::size_t object_index, float distance);
+float RuntimePropLodDistance(std::size_t object_index);
 std::size_t ActiveKinematicObjectCount();
 std::size_t ActiveHingedDoorCount();
 std::size_t ActiveWaterBasinCount();

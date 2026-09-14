@@ -19,6 +19,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -65,15 +66,20 @@
 #include <windows.h>
 #endif
 #endif
+#include "skate3_lua_client_natives.h"
 #include "skate3_mechanics_sandbox.h"
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_multiplayer.h"
 #include "skate3_multiplayer_assets.h"
+#include "skate3_clothing.h"
+#include "skate3_retail_ui_hooks.h"
 #include "skate3_multiplayer_capture.h"
 #include "skate3_multiplayer_lifecycle.h"
 #include "skate3_multiplayer_motion_trace.h"
 #include "skate3_multiplayer_pose_cadence.h"
 #include "skate3_multiplayer_render_cache.h"
+#include "skate3_cef_console.h"
+#include "skate3_cef_nui.h"
 #include "skate3_native_collision.h"
 #include "skate3_native_raytraced_mirror.h"
 #include "skate3_native_scene_gpu_internal.h"
@@ -81,6 +87,7 @@
 #include "skate3_trick_pipeline.h"
 
 // Cvars defined in skate3_native_scene.cpp (and SDK cvars re-declared there).
+REXCVAR_DECLARE(bool, skate3_multiplayer_pin_unused_bones);
 REXCVAR_DECLARE(bool, async_shader_compilation);
 REXCVAR_DECLARE(bool, native_render_suppress_emulated_draws);
 REXCVAR_DECLARE(bool, readback_resolve_half_pixel_offset);
@@ -620,6 +627,14 @@ void EvictTexStore(uint64_t frame_number, uint64_t submission) {
   std::vector<std::pair<uint64_t, uint64_t>> ages;  // (last-used frame, key)
   ages.reserve(g_r.tex_store.size());
   for (const auto& [k, t] : g_r.tex_store) {
+    // A remote player's appearance is never a candidate. It was assembled
+    // once from a network transfer and cannot be decoded again from guest
+    // memory the way a world texture can, so evicting it strands that peer
+    // with untextured clothing for the rest of the session. Going off-camera
+    // for a few seconds is enough to make it idle.
+    if (g_r.remote_appearance_textures.contains(k)) {
+      continue;
+    }
     if (t.last_used_frame + min_idle_frames < frame_number) {
       ages.emplace_back(t.last_used_frame, k);
     }
@@ -3614,6 +3629,262 @@ bool EnsureBlurPsos(const NativeGuestOutputRenderContext& context) {
   return true;
 }
 
+// Shared CEF overlay PSO (dev console + NUI): fullscreen-triangle, no
+// vertex buffer (same shape as the blur passes), alpha-blended over the
+// guest output. PSO-create failure only disables the CEF overlays - see
+// cef_overlay_pso_failed's use below - the rest of the renderer is
+// unaffected, matching the blur pass's own graceful-degradation precedent
+// above.
+bool EnsureCefOverlayPso(const NativeGuestOutputRenderContext& context) {
+  if (g_r.pso_cef_overlay != nullptr || g_r.cef_overlay_pso_failed) {
+    return g_r.pso_cef_overlay != nullptr;
+  }
+  nrhi::Device* device = context.device;
+  nrhi::Shader* vs = device->CreateShader(
+      MakeShaderDesc(nrhi::ShaderStage::kVertex, "dev_console.hlsl",
+                     kDevConsoleShaderSource, "vs_main", nullptr, ""));
+  nrhi::Shader* ps = device->CreateShader(
+      MakeShaderDesc(nrhi::ShaderStage::kPixel, "dev_console.hlsl",
+                     kDevConsoleShaderSource, "ps_main", nullptr, ""));
+  if (vs == nullptr || ps == nullptr) {
+    REXLOG_WARN(
+        "native-scene: CEF overlay shader compile failed - overlays disabled");
+    g_r.cef_overlay_pso_failed = true;
+    return false;
+  }
+  nrhi::GraphicsPipelineDesc desc;
+  desc.layout = g_r.layout;
+  desc.vs = vs;
+  desc.ps = ps;
+  desc.blend.enable = true;
+  desc.blend.src = nrhi::BlendFactor::kSrcAlpha;
+  desc.blend.dst = nrhi::BlendFactor::kInvSrcAlpha;
+  desc.blend.op = nrhi::BlendOp::kAdd;
+  desc.blend.src_alpha = nrhi::BlendFactor::kOne;
+  desc.blend.dst_alpha = nrhi::BlendFactor::kInvSrcAlpha;
+  desc.blend.op_alpha = nrhi::BlendOp::kAdd;
+  desc.cull = nrhi::CullMode::kNone;
+  desc.rtv_format = context.guest_output->format();
+  desc.sample_count = 1;
+  g_r.pso_cef_overlay = device->CreateGraphicsPipeline(desc);
+  device->DestroyDeferred(vs);
+  device->DestroyDeferred(ps);
+  if (g_r.pso_cef_overlay == nullptr) {
+    REXLOG_WARN(
+        "native-scene: CEF overlay PSO creation failed - overlays disabled");
+    g_r.cef_overlay_pso_failed = true;
+    return false;
+  }
+  return true;
+}
+
+// Creates one overlay's texture + persistently-mapped upload buffer sized
+// for `width`x`height`, recreating them if a previous call sized them
+// differently - both overlays track guest_output's own size, so this
+// changes whenever the game's resolution does. Mirrors g_r.ui_ring's
+// persistent-map pattern rather than the map/copy/unmap-then-destroy
+// pattern ordinary guest textures use, since this updates on every CEF
+// paint rather than once per content change.
+bool EnsureCefOverlayTexture(nrhi::Device* device,
+                             RendererState::CefOverlayGpu& overlay,
+                             uint32_t width, uint32_t height) {
+  if (overlay.tex != nullptr && overlay.tex_w == width &&
+      overlay.tex_h == height) {
+    return true;
+  }
+  if (overlay.tex != nullptr) {
+    device->DestroyDeferred(overlay.tex);
+    if (overlay.srv != nullptr) {
+      device->DestroyDeferred(overlay.srv);
+    }
+    if (overlay.upload != nullptr) {
+      device->DestroyDeferred(overlay.upload);
+    }
+    overlay.tex = nullptr;
+    overlay.srv = nullptr;
+    overlay.upload = nullptr;
+    overlay.upload_cpu = nullptr;
+  }
+  overlay.upload_pitch = (width * 4u + (nrhi::kRowPitchAlignment - 1u)) &
+                         ~(nrhi::kRowPitchAlignment - 1u);
+  nrhi::TextureDesc desc;
+  desc.kind = nrhi::TextureKind::k2D;
+  desc.width = width;
+  desc.height = height;
+  desc.mip_levels = 1;
+  desc.format = nrhi::Format::kR8G8B8A8_UNORM;
+  desc.initial_state = nrhi::ResourceState::kPixelShaderResource;
+  overlay.tex = device->CreateTexture(desc);
+  if (overlay.tex == nullptr) {
+    return false;
+  }
+  nrhi::TextureViewDesc srv;
+  srv.dimension = nrhi::ViewDimension::k2D;
+  srv.format = nrhi::Format::kR8G8B8A8_UNORM;
+  srv.mip_levels = 1;
+  overlay.srv = device->CreateTextureView(overlay.tex, srv);
+  overlay.upload =
+      CreateUploadBuffer(device, size_t(overlay.upload_pitch) * height,
+                         nrhi::BufferBindClass::kCopySrc);
+  overlay.upload_cpu =
+      overlay.upload ? static_cast<uint8_t*>(device->Map(overlay.upload))
+                     : nullptr;
+  if (overlay.srv == nullptr || overlay.upload_cpu == nullptr) {
+    device->DestroyDeferred(overlay.tex);
+    overlay.tex = nullptr;
+    overlay.srv = nullptr;
+    overlay.tex_w = 0;
+    overlay.tex_h = 0;
+    return false;
+  }
+  overlay.tex_w = width;
+  overlay.tex_h = height;
+  // Fresh texture: whatever was uploaded before is gone with the old one.
+  overlay.uploaded_serial = 0;
+  return true;
+}
+
+// The composite shared by both CEF overlays: upload `frame` (BGRA32, as CEF
+// paints it) into `overlay`'s texture and draw it at (screen_x, screen_y)
+// sized target_w x target_h. `frame` must already match those dimensions -
+// see each caller's own stale-size check for why it might not.
+void DrawCefOverlay(const NativeGuestOutputRenderContext& context,
+                    nrhi::Cmd* cmd, RendererState::CefOverlayGpu& overlay,
+                    const uint8_t* frame, uint64_t frame_serial,
+                    int32_t screen_x, int32_t screen_y, uint32_t target_w,
+                    uint32_t target_h, bool output_in_guest_output_state) {
+  // CEF only paints when the page actually changed, so a static overlay
+  // (which for NUI is most frames, since it is composited every frame
+  // whether or not anything moved) already has the right pixels in its
+  // texture and needs nothing but the draw below.
+  const bool upload_needed = overlay.uploaded_serial != frame_serial;
+  if (upload_needed) {
+    const uint32_t src_pitch = target_w * 4u;
+    for (uint32_t y = 0; y < target_h; ++y) {
+      std::memcpy(overlay.upload_cpu + size_t(y) * overlay.upload_pitch,
+                  frame + size_t(y) * src_pitch, src_pitch);
+    }
+  }
+
+  const nrhi::ResourceState output_entry_state =
+      output_in_guest_output_state ? nrhi::ResourceState::kGuestOutput
+                                   : nrhi::ResourceState::kRenderTarget;
+  cmd->SetBindingLayout(g_r.layout);
+  cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+  if (upload_needed) {
+    cmd->Barrier(overlay.tex, nrhi::ResourceState::kPixelShaderResource,
+                 nrhi::ResourceState::kCopyDest);
+  }
+  if (output_in_guest_output_state) {
+    cmd->Barrier(context.guest_output, output_entry_state,
+                 nrhi::ResourceState::kRenderTarget);
+  }
+  cmd->FlushBarriers();
+  if (upload_needed) {
+    cmd->CopyBufferToTexture(overlay.tex, 0, 0, overlay.upload, 0,
+                             overlay.upload_pitch, target_w, target_h, 1);
+    cmd->Barrier(overlay.tex, nrhi::ResourceState::kCopyDest,
+                 nrhi::ResourceState::kPixelShaderResource);
+    cmd->FlushBarriers();
+    overlay.uploaded_serial = frame_serial;
+  }
+
+  cmd->SetRenderTargets(context.guest_output, nullptr);
+  cmd->SetViewport(nrhi::Viewport{float(screen_x), float(screen_y),
+                                  float(target_w), float(target_h), 0.0f,
+                                  1.0f});
+  cmd->SetScissor(nrhi::Rect{screen_x, screen_y,
+                             screen_x + static_cast<int32_t>(target_w),
+                             screen_y + static_cast<int32_t>(target_h)});
+  cmd->SetPipeline(g_r.pso_cef_overlay);
+  cmd->SetTexture(1, overlay.srv);
+  cmd->Draw(3, 0);
+
+  if (output_in_guest_output_state) {
+    cmd->Barrier(context.guest_output, nrhi::ResourceState::kRenderTarget,
+                 nrhi::ResourceState::kGuestOutput);
+    cmd->FlushBarriers();
+  }
+}
+
+void DrawDevConsoleOverlay(const NativeGuestOutputRenderContext& context,
+                           nrhi::Cmd* cmd, bool output_in_guest_output_state) {
+  if (!g_dev_console_visible.load(std::memory_order_relaxed)) {
+    return;
+  }
+  // Published every frame the console is visible (even before the PSO or a
+  // CEF frame exists) so the app-thread input dialog has fresh data as
+  // early as possible - see g_dev_console_guest_output_w/h's own comment.
+  g_dev_console_guest_output_w.store(context.guest_output_width,
+                                     std::memory_order_relaxed);
+  g_dev_console_guest_output_h.store(context.guest_output_height,
+                                     std::memory_order_relaxed);
+  if (!EnsureCefOverlayPso(context)) {
+    return;
+  }
+  // Full guest-output width, a fixed fraction of its height - see
+  // kConsoleHeightFraction's own comment. Recomputed every frame so a
+  // resolution/window change is picked up without any extra plumbing.
+  const uint32_t target_w = context.guest_output_width;
+  const uint32_t target_h = std::max(
+      1u, static_cast<uint32_t>(context.guest_output_height *
+                                cef_console::kConsoleHeightFraction));
+  cef_console::Resize(static_cast<int>(target_w), static_cast<int>(target_h));
+
+  nrhi::Device* device = context.device;
+  if (!EnsureCefOverlayTexture(device, g_r.dev_console_overlay, target_w,
+                               target_h)) {
+    return;
+  }
+  uint32_t frame_w = 0, frame_h = 0;
+  uint64_t frame_serial = 0;
+  const uint8_t* frame =
+      cef_console::LatestFrame(frame_w, frame_h, frame_serial);
+  // A resize takes CEF a frame or two to catch up (it repaints
+  // asynchronously on its own thread); until frame_w/h matches the texture
+  // we just resized to, skip drawing rather than stretch a stale-sized
+  // buffer into the new texture.
+  if (frame == nullptr || frame_w != target_w || frame_h != target_h) {
+    return;
+  }
+  DrawCefOverlay(context, cmd, g_r.dev_console_overlay, frame,
+                 frame_serial, cef_console::kConsoleScreenX,
+                 cef_console::kConsoleScreenY, target_w, target_h,
+                 output_in_guest_output_state);
+}
+
+void DrawNuiOverlay(const NativeGuestOutputRenderContext& context,
+                    nrhi::Cmd* cmd, bool output_in_guest_output_state) {
+  if (!g_nui_visible.load(std::memory_order_relaxed)) {
+    return;
+  }
+  g_nui_guest_output_w.store(context.guest_output_width,
+                             std::memory_order_relaxed);
+  g_nui_guest_output_h.store(context.guest_output_height,
+                             std::memory_order_relaxed);
+  if (!EnsureCefOverlayPso(context)) {
+    return;
+  }
+  // NUI is always exactly the guest output: resources lay their pages out
+  // in CSS against the full screen, the same contract FiveM gives them.
+  const uint32_t target_w = context.guest_output_width;
+  const uint32_t target_h = context.guest_output_height;
+  cef_nui::Resize(static_cast<int>(target_w), static_cast<int>(target_h));
+
+  nrhi::Device* device = context.device;
+  if (!EnsureCefOverlayTexture(device, g_r.nui_overlay, target_w, target_h)) {
+    return;
+  }
+  uint32_t frame_w = 0, frame_h = 0;
+  uint64_t frame_serial = 0;
+  const uint8_t* frame = cef_nui::LatestFrame(frame_w, frame_h, frame_serial);
+  if (frame == nullptr || frame_w != target_w || frame_h != target_h) {
+    return;  // same post-resize catch-up window as the console's.
+  }
+  DrawCefOverlay(context, cmd, g_r.nui_overlay, frame, frame_serial, 0, 0,
+                 target_w, target_h, output_in_guest_output_state);
+}
+
 // Selection-outline edge composite PSO; create failure disables outline.
 bool EnsureOutlineEdgePso(const NativeGuestOutputRenderContext& context) {
   nrhi::Device* device = context.device;
@@ -5342,6 +5613,20 @@ void WarmItemResources(const NativeGuestOutputRenderContext& context,
         return;
       }
       it->second.recheck_frame = frame_number + 16;
+      // A remote player's appearance is NEVER re-derived from guest memory.
+      //
+      // The fingerprint check below exists to notice a guest texture whose
+      // payload was rewritten in place, and to re-decode it from that
+      // memory. An appearance texture came off the network instead: the
+      // guest address its fetch words name is not where its content lives.
+      // When world streaming later reuses that memory the fingerprint duly
+      // changes, this retires a perfectly good texture and re-decodes it
+      // from whatever is there now - which fails, and the peer's clothing
+      // turns white and never comes back. Observed as 22 decode failures
+      // five seconds after a clean 23-texture install, with no recovery.
+      if (g_r.remote_appearance_textures.contains(key)) {
+        return;
+      }
       const uint64_t fp = SampleProbeFingerprint(base, it->second);
       if (!it->second.incomplete && (fp == 0 || fp == it->second.payload_fp)) {
         return;
@@ -5894,6 +6179,14 @@ void PrewarmCommit(const NativeGuestOutputRenderContext& context,
       // APT art legitimately rewrites its payload every guest frame, so the
       // re-sample below would reject every mid-animation commit and freeze
       // the element; the 2D resolve's content probe is the heal path there.
+      // NOTE: remote appearances are deliberately NOT exempt here, unlike at
+      // the settle and heal paths. Exempting them was tried and made things
+      // strictly worse - white clothing AND a white board, where before only
+      // the board was wrong. The reason is that this site does the opposite
+      // job to the other two: they DESTROY a good installed texture, whereas
+      // this one REJECTS a decode that was read while its payload was still
+      // streaming. Skipping it lets a garbage interleave commit, which is
+      // precisely the failure it exists to prevent.
       if (t.valid && !t.cube && !t.ui && verify_base != nullptr &&
           t.gt.payload_addr != 0 &&
           SampleProbeFingerprint(verify_base, t.gt) != t.gt.payload_fp) {
@@ -6007,24 +6300,46 @@ void PrewarmCommit(const NativeGuestOutputRenderContext& context,
           RetireGuestTexture(wit->second, context.device->CurrentSubmission());
           g_r.tex_store.erase(wit);
         }
+        // Keys already reported as failed, so a later success can be
+        // reported too. Without that, the log says a texture went white and
+        // never says whether it came back - and "white for one frame" and
+        // "white for the whole session" are the same line today, which is
+        // exactly the ambiguity that makes a white remote skater hard to
+        // attribute.
+        static std::unordered_set<uint64_t> logged_failed;
         if (t.valid) {
           CommitStagedGuestTexture(context, t.gt, t.commit);
           committed_tex = true;
           // Content landed this frame; the video-start cold/hot classifier
           // (GuestTexture::last_change_frame) keys off commit times.
           t.gt.last_change_frame = frame_number;
+          if (logged_failed.erase(t.words_key) != 0) {
+            REXLOG_INFO(
+                "native-scene: texture decode RECOVERED key={:016X} after "
+                "{} failure(s)",
+                t.words_key, static_cast<unsigned>(t.gt.fail_count));
+          }
         } else {
           t.gt.fail_count = BumpFail(t.gt.fail_count);
           t.gt.retry_after_frame = frame_number + RetryBackoff(t.gt.fail_count);
           // Failed decodes render white: log each once (capped) so white
           // meshes stay attributable to a specific texture.
-          static std::unordered_set<uint64_t> logged_failed;
           if (logged_failed.size() < 64 &&
               logged_failed.insert(t.words_key).second) {
+            // `pinned` answers the question three fixes have now turned on:
+            // whether the texture that went white is one a remote appearance
+            // installed (and so should have been exempt from every
+            // guest-memory heal), or something else entirely wearing the
+            // same symptom. `pinned_total` distinguishes "not in the set"
+            // from "the set is empty".
             REXLOG_INFO(
-                "native-scene: texture decode FAILED key={:016X} "
+                "native-scene: texture decode FAILED key={:016X} pinned={} "
+                "pinned_total={} payload_addr={:08X} "
                 "fetch=[{:08X} {:08X} {:08X} {:08X} {:08X} {:08X}]",
-                t.words_key, t.gt.fetch_words[0], t.gt.fetch_words[1],
+                t.words_key,
+                g_r.remote_appearance_textures.contains(t.words_key) ? 1 : 0,
+                g_r.remote_appearance_textures.size(), t.gt.payload_addr,
+                t.gt.fetch_words[0], t.gt.fetch_words[1],
                 t.gt.fetch_words[2], t.gt.fetch_words[3], t.gt.fetch_words[4],
                 t.gt.fetch_words[5]);
           }
@@ -10085,6 +10400,32 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
   if (recipe_data == nullptr || recipe_size < 64) {
     return {};
   }
+
+  // Apply any wardrobe override before the recipe is hashed or resolved.
+  //
+  // Written BACK into guest memory, not just into our copy: the recipe there
+  // is what retail itself reads when it rebuilds the character, so patching
+  // only our copy would change what peers see while leaving the local skater
+  // permanently stale. Re-applied every time the bytes are read, so the game
+  // rewriting them does not undo the override.
+  //
+  // Only when the recipe came FROM guest memory - the profile-file path
+  // (skate3_multiplayer_local_profile_recipe) is a host file this has no
+  // business rewriting, and there is no guest buffer to write back to.
+  if (profile_recipe_bytes.empty()) {
+    static std::vector<uint8_t> override_scratch;
+    override_scratch.assign(recipe_data, recipe_data + recipe_size);
+    if (clothing::ApplyOverrides(override_scratch) &&
+        override_scratch.size() == recipe_size) {
+      // Writes are not fault-recoverable (see skate3_native_guest_read.h), so
+      // this only proceeds on a range that was just read successfully.
+      std::memcpy(base + kRecipeGuestAddress, override_scratch.data(),
+                  recipe_size);
+      std::memcpy(recipe_buffer.data(), override_scratch.data(), recipe_size);
+      recipe_data = recipe_buffer.data();
+    }
+  }
+
   const uint64_t recipe_identity =
       AppearanceHashBytes(1469598103934665603ull, recipe_data, recipe_size);
   if (recipe_identity != cached_recipe_identity) {
@@ -10096,6 +10437,12 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
     cached_recipe_identity = recipe_identity;
     cached_recipe_bytes = std::move(recipe);
     cached_recipe = std::move(resolved);
+    // Hand the validated bytes to the wardrobe reader so scripts can report
+    // what is worn. Done HERE, on the identity change, rather than per frame:
+    // this is the one place that knows where the live recipe lives, and it
+    // has already proved the bytes parse.
+    clothing::PublishLocalRecipe(cached_recipe_bytes.data(),
+                                 cached_recipe_bytes.size());
   }
   if (cached_recipe.pieces.empty()) {
     return cached_blob;
@@ -11027,6 +11374,120 @@ bool AcquireRemoteAppearanceInstallOperation(uint64_t frame) {
   return true;
 }
 
+// Board bones (26 TRUCK_FRONT, 27/28 front wheels, 29 TRUCK_BACK, 30/31 rear
+// wheels) are rigidly glued to their truck, so a wheel's offset from its
+// truck must be constant. It measured as NOT constant, which points at the
+// capture rather than the wire: the canonical array is filled last-writer-
+// wins from each piece's palette, so if two pieces map to a wheel bone and
+// the item order is not stable, the row alternates between them every frame.
+//
+// This records who writes each board bone and how much the wheel-to-truck
+// offset actually moves, which separates "several writers fighting" from
+// "one writer producing unstable rows".
+void RecordBoardBoneWriter(std::size_t canonical_bone, std::uint32_t mesh,
+                           const float* rows);
+void ReportBoardBoneWriters(const std::vector<float>& canonical);
+
+// Accumulates the canonical bones this client actually needs in order to
+// draw remote players, and reports the set periodically. This is the ground
+// truth for what may be left off the wire - for the unweighted-bone freeze
+// and for the reduced-bone fidelity tiers alike.
+std::mutex g_board_bone_mutex;
+std::array<std::set<std::uint32_t>, 32> g_board_bone_writers;
+std::array<std::size_t, 32> g_board_bone_writes{};
+std::array<float, 32> g_board_offset_spread{};
+std::array<float, 32 * 3> g_board_offset_first{};
+std::array<bool, 32> g_board_offset_seeded{};
+std::chrono::steady_clock::time_point g_board_bone_last_log{};
+
+void RecordBoardBoneWriter(std::size_t canonical_bone, std::uint32_t mesh,
+                           const float* rows) {
+  (void)rows;
+  if (canonical_bone >= 32) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(g_board_bone_mutex);
+  g_board_bone_writers[canonical_bone].insert(mesh);
+  ++g_board_bone_writes[canonical_bone];
+}
+
+void ReportBoardBoneWriters(const std::vector<float>& canonical) {
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lock(g_board_bone_mutex);
+  // Wheel -> its truck, in the truck's own frame. Constant if truly glued.
+  const auto measure = [&canonical](std::size_t wheel, std::size_t truck) {
+    if (canonical.size() < (std::max(wheel, truck) + 1) * 12) {
+      return;
+    }
+    const float* wheel_rows = canonical.data() + wheel * 12;
+    const float* truck_rows = canonical.data() + truck * 12;
+    float offset[3] = {};
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      float sum = 0.0f;
+      for (std::size_t inner = 0; inner < 3; ++inner) {
+        sum += truck_rows[inner * 4 + axis] *
+               (wheel_rows[inner * 4 + 3] - truck_rows[inner * 4 + 3]);
+      }
+      offset[axis] = sum;
+    }
+    if (!g_board_offset_seeded[wheel]) {
+      g_board_offset_seeded[wheel] = true;
+      std::copy_n(offset, 3, g_board_offset_first.begin() + wheel * 3);
+      return;
+    }
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      g_board_offset_spread[wheel] = std::max(
+          g_board_offset_spread[wheel],
+          std::fabs(offset[axis] - g_board_offset_first[wheel * 3 + axis]));
+    }
+  };
+  measure(27, 26);
+  measure(28, 26);
+  measure(30, 29);
+  measure(31, 29);
+  if (now - g_board_bone_last_log < std::chrono::seconds(5)) {
+    return;
+  }
+  g_board_bone_last_log = now;
+  std::string report;
+  for (std::size_t bone = 26; bone <= 31; ++bone) {
+    char entry[96];
+    std::snprintf(entry, sizeof(entry), " %zu:writers=%zu,writes=%zu,drift=%.4f",
+                  bone, g_board_bone_writers[bone].size(),
+                  g_board_bone_writes[bone],
+                  static_cast<double>(g_board_offset_spread[bone]));
+    report += entry;
+    g_board_bone_writers[bone].clear();
+    g_board_bone_writes[bone] = 0;
+  }
+  REXLOG_INFO("multiplayer-board-bones:{}", report);
+}
+
+void RecordConsumedCanonicalBone(std::size_t canonical_bone) {
+  static std::mutex mutex;
+  static std::array<bool, 256> consumed{};
+  static std::size_t consumed_count = 0;
+  static std::chrono::steady_clock::time_point last_log{};
+  std::lock_guard<std::mutex> lock(mutex);
+  if (canonical_bone < consumed.size() && !consumed[canonical_bone]) {
+    consumed[canonical_bone] = true;
+    ++consumed_count;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last_log < std::chrono::seconds(5)) {
+    return;
+  }
+  last_log = now;
+  std::string missing;
+  for (std::size_t bone = 0; bone < 131; ++bone) {
+    if (!consumed[bone]) {
+      missing += (missing.empty() ? "" : ",") + std::to_string(bone);
+    }
+  }
+  REXLOG_INFO("multiplayer-consumed-bones: needed={} never_used=[{}]",
+              consumed_count, missing);
+}
+
 bool ResolveRemoteAppearanceRigCache(const DrawItem& item,
     RemoteAppearancePieceRenderCache& cache) {
   if (cache.rig_lookup_complete) {
@@ -11622,6 +12083,7 @@ void ReleaseRemoteAppearanceResources(
   std::size_t released_textures = 0;
   std::size_t released_texture_routes = 0;
   for (uint64_t store_key : state.texture_store_keys) {
+    g_r.remote_appearance_textures.erase(store_key);
     const auto texture = g_r.tex_store.find(store_key);
     if (texture != g_r.tex_store.end()) {
       RetireGuestTexture(texture->second, context.device->CurrentSubmission());
@@ -11993,9 +12455,11 @@ bool InstallRemoteRecipeAppearanceIncremental(
     }
     g_r.tex_store.emplace(store_key, std::move(guest));
     transaction.staged.texture_store_keys.push_back(store_key);
+    g_r.remote_appearance_textures.insert(store_key);
     RendererState::TexRoute route;
     route.key = store_key;
     route.demoted = true;
+    route.appearance = true;
     g_r.tex_routes[object_key] = route;
     transaction.texture_objects.emplace(texture_id, object_key);
     ++transaction.texture_index;
@@ -12387,9 +12851,11 @@ bool InstallRemoteRecipeAppearance(
     }
     g_r.tex_store.emplace(store_key, std::move(guest));
     installed.texture_store_keys.push_back(store_key);
+    g_r.remote_appearance_textures.insert(store_key);
     RendererState::TexRoute route;
     route.key = store_key;
     route.demoted = true;
+    route.appearance = true;
     g_r.tex_routes[object_key] = route;
     texture_objects.emplace(texture_id, object_key);
   }
@@ -12705,9 +13171,11 @@ bool InstallRemoteAppearance(const NativeGuestOutputRenderContext& context,
     }
     g_r.tex_store.emplace(store_key, std::move(guest));
     installed.texture_store_keys.push_back(store_key);
+    g_r.remote_appearance_textures.insert(store_key);
     RendererState::TexRoute route;
     route.key = store_key;
     route.demoted = true;
+    route.appearance = true;
     g_r.tex_routes[object_key] = route;
     texture_objects[texture_index] = object_key;
   }
@@ -12877,30 +13345,52 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   if (multiplayer_remote_items != nullptr) {
     multiplayer_remote_items->clear();
   }
-  if (!mechanics_sandbox::VisualMapEnabled() || cmd == nullptr) {
+  if (cmd == nullptr) {
     return;
   }
-  mechanics_sandbox::ObserveSandboxCamera(scene.cam_pos);
+  // Vanilla Mode (retail University map, mechanics_sandbox explicitly
+  // disabled) hands world/collision authority back to the retail renderer,
+  // but multiplayer replication further below has no dependency on the
+  // owned/sandbox map itself - only this function's sandbox *geometry*
+  // drawing does. Gate that geometry alone so replication keeps working
+  // regardless of which world mode is active. Retail world coordinates need
+  // no sandbox-map offset, so origin stays {0,0,0} outside sandbox mode -
+  // this is the same convention the wire protocol already expects on both
+  // ends (see SampleLocalPose in skate3_multiplayer.cpp).
+  bool sandbox_active = mechanics_sandbox::VisualMapEnabled();
+  // Props on the RETAIL map. The owned base map is not drawn in Vanilla
+  // Mode - enabling it swaps the world out, which is the whole reason this
+  // exists - but a runtime-spawned object is not part of that base map and
+  // has every reason to appear. Origin is {0,0,0} outside sandbox mode (see
+  // below), so these are already in retail world coordinates.
+  const std::size_t runtime_prop_first =
+      mechanics_sandbox::map::RuntimeSpawnedObjectFirstIndex();
+  const bool draw_runtime_props =
+      !sandbox_active &&
+      runtime_prop_first != std::numeric_limits<std::size_t>::max() &&
+      runtime_prop_first <
+          mechanics_sandbox::map::ActiveEditableObjectCount();
   float origin[3] = {};
-  if (!mechanics_sandbox::SandboxMapRenderOrigin(origin)) {
-    static std::atomic<uint32_t> s_origin_log{0};
-    if (s_origin_log.fetch_add(1, std::memory_order_relaxed) == 0) {
-      REXLOG_WARN("native-scene: sandbox map draw skipped; origin unavailable");
+  if (sandbox_active) {
+    mechanics_sandbox::ObserveSandboxCamera(scene.cam_pos);
+    if (!mechanics_sandbox::SandboxMapRenderOrigin(origin)) {
+      static std::atomic<uint32_t> s_origin_log{0};
+      if (s_origin_log.fetch_add(1, std::memory_order_relaxed) == 0) {
+        REXLOG_WARN(
+            "native-scene: sandbox map draw skipped; origin unavailable");
+      }
+      // Sandbox map not ready yet this frame (e.g. still loading): skip
+      // only the sandbox-specific geometry below, not multiplayer.
+      sandbox_active = false;
+      std::fill_n(origin, 3, 0.0f);
     }
-    return;
   }
-  static std::atomic<uint32_t> s_map_transform_log{0};
-  if (s_map_transform_log.fetch_add(1, std::memory_order_relaxed) == 0) {
-    REXLOG_INFO(
-        "native-scene: sandbox map draw transform "
-        "origin=({:.3f},{:.3f},{:.3f}) "
-                "camera=({:.3f},{:.3f},{:.3f})",
-        origin[0], origin[1], origin[2], scene.cam_pos[0], scene.cam_pos[1],
-        scene.cam_pos[2]);
-  }
-  // Render in the same verified board-origin frame used by owned collision.
-  // The old camera-relative probe made a huge clipped triangle appear in the
-  // sky and visually disconnected the park from its collision geometry.
+  // Hoisted out of the sandbox-only block below: the multiplayer remote-item
+  // fallback proxy draw (further down this function) and the unconditional
+  // post-geometry GPU state reset both need these regardless of whether
+  // sandbox_active is true. Declaring them unconditionally has no observable
+  // effect by itself (pure local declarations); only their *use* below
+  // remains gated where it was already sandbox-specific.
   float constants[52] = {};
   const auto set_world_translation =
       [&constants, &scene](float x, float y, float z, float scale = 1.0f) {
@@ -12952,52 +13442,6 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           }
         }
       };
-  set_world_translation(origin[0], origin[1], origin[2]);
-  constants[36] = scene.cam_pos[0];
-  constants[37] = scene.cam_pos[1];
-  constants[38] = scene.cam_pos[2];
-  constants[39] = -41.0f;
-  const skate::world::DayNightState celestial =
-      mechanics_sandbox::map::ActiveDayNightState();
-  const bool dynamic_lighting =
-      mechanics_sandbox::map::DynamicWorldLightingEnabled();
-  constants[40] = celestial.light_direction_to_light.x;
-  constants[41] = celestial.light_direction_to_light.y;
-  constants[42] = celestial.light_direction_to_light.z;
-  // A negative ambient is an owned-world-only sentinel: preserve the
-  // clock/sky state but remove its ambient, direct and shadow lighting.
-  // Imported maps then use their baked lightmaps through the captured
-  // retail fog/exposure/tonemap chain instead of the custom hybrid path.
-  constants[43] = dynamic_lighting ? celestial.ambient : -1.0f;
-  constants[44] = celestial.light_color.x;
-  constants[45] = celestial.light_color.y;
-  constants[46] = celestial.light_color.z;
-  constants[47] = dynamic_lighting ? celestial.light_intensity : 0.0f;
-
-  cmd->SetBindingLayout(g_r.layout);
-  cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
-  cmd->SetRootConstants(0, 52, constants, 0);
-  cmd->SetBufferSrv(3, g_r.bone_ring, 0);
-  cmd->SetTexture(1, g_r.white.srv);
-  cmd->SetTexture(2, g_r.white.srv);
-  cmd->SetTexture(4, g_r.white.srv);
-  cmd->SetTexture(5, g_r.white.srv);
-  cmd->SetTexturePair(7, g_r.white_cube.srv,
-      shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
-  // Keep both static sun maps on t10/t11 while the owned-map renderer
-  // changes t8/t9 material resources.
-  nrhi::TextureView* t8_default[6] = {
-      g_r.white.srv,
-      g_r.white.srv,
-      g_r.owned_nsm_active
-          ? g_r.owned_static_sun_srv[0]
-          : (g_r.static_sun_valid ? g_r.static_sun_srv : g_r.white.srv),
-      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
-      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv,
-      g_r.white.srv};
-  cmd->SetTextures(8, t8_default, 6);
-  cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
-
   const auto bind_frame_temporal = [&]() {
     cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
   };
@@ -13049,9 +13493,89 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         next.bones.clear();
         next.generation = scene.generation;
       };
+  uint32_t draw_calls = 0;
+  if (sandbox_active) {
+  static std::atomic<uint32_t> s_map_transform_log{0};
+  if (s_map_transform_log.fetch_add(1, std::memory_order_relaxed) == 0) {
+    REXLOG_INFO(
+        "native-scene: sandbox map draw transform "
+        "origin=({:.3f},{:.3f},{:.3f}) "
+                "camera=({:.3f},{:.3f},{:.3f})",
+        origin[0], origin[1], origin[2], scene.cam_pos[0], scene.cam_pos[1],
+        scene.cam_pos[2]);
+  }
+  }
+  // Hoisted unconditional: the multiplayer remote-item fallback proxy draw
+  // and post-effects (moving lights/rain/lightning) further below need this
+  // GPU state and lighting-constant setup regardless of sandbox_active, and
+  // world/definition/the telemetry counters are read by the unconditional
+  // RecordMapChunks/RecordMapEditorObjects telemetry call at the end of this
+  // function. mechanics_sandbox::map::Active*() are lazily-initialized
+  // singletons safe to call regardless of world mode.
+  set_world_translation(origin[0], origin[1], origin[2]);
+  constants[36] = scene.cam_pos[0];
+  constants[37] = scene.cam_pos[1];
+  constants[38] = scene.cam_pos[2];
+  constants[39] = -41.0f;
+  const skate::world::DayNightState celestial =
+      mechanics_sandbox::map::ActiveDayNightState();
+  const bool dynamic_lighting =
+      mechanics_sandbox::map::DynamicWorldLightingEnabled();
+  constants[40] = celestial.light_direction_to_light.x;
+  constants[41] = celestial.light_direction_to_light.y;
+  constants[42] = celestial.light_direction_to_light.z;
+  // A negative ambient is an owned-world-only sentinel: preserve the
+  // clock/sky state but remove its ambient, direct and shadow lighting.
+  // Imported maps then use their baked lightmaps through the captured
+  // retail fog/exposure/tonemap chain instead of the custom hybrid path.
+  constants[43] = dynamic_lighting ? celestial.ambient : -1.0f;
+  constants[44] = celestial.light_color.x;
+  constants[45] = celestial.light_color.y;
+  constants[46] = celestial.light_color.z;
+  constants[47] = dynamic_lighting ? celestial.light_intensity : 0.0f;
+
+  cmd->SetBindingLayout(g_r.layout);
+  cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
+  cmd->SetRootConstants(0, 52, constants, 0);
+  cmd->SetBufferSrv(3, g_r.bone_ring, 0);
+  cmd->SetTexture(1, g_r.white.srv);
+  cmd->SetTexture(2, g_r.white.srv);
+  cmd->SetTexture(4, g_r.white.srv);
+  cmd->SetTexture(5, g_r.white.srv);
+  cmd->SetTexturePair(7, g_r.white_cube.srv,
+      shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
+  // Keep both static sun maps on t10/t11 while the owned-map renderer
+  // changes t8/t9 material resources.
+  nrhi::TextureView* t8_default[6] = {
+      g_r.white.srv,
+      g_r.white.srv,
+      g_r.owned_nsm_active
+          ? g_r.owned_static_sun_srv[0]
+          : (g_r.static_sun_valid ? g_r.static_sun_srv : g_r.white.srv),
+      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
+      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv,
+      g_r.white.srv};
+  cmd->SetTextures(8, t8_default, 6);
+  cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
 
   const mechanics_sandbox::map::VisualWorld& world =
       mechanics_sandbox::map::ActiveVisualWorld();
+  const skate::world::MapDefinition& definition =
+      mechanics_sandbox::map::ActiveDefinition();
+  uint32_t candidate_chunks = 0;
+  uint32_t visible_chunks = 0;
+  uint32_t occluded_chunks = 0;
+  uint32_t editor_pose_ready = 0;
+  uint32_t editor_pose_fallbacks = 0;
+  uint32_t editor_visible_objects = 0;
+  uint32_t editor_resident_objects = 0;
+  uint32_t editor_object_draws = 0;
+
+  if (sandbox_active || draw_runtime_props) {
+  // Static chunk geometry is the owned BASE MAP, and only the sandbox draws
+  // it. The editable-object loop further down is deliberately outside this
+  // inner gate: those are individual objects, not the world.
+  if (sandbox_active) {
   constexpr float kDetailRenderDistance = 768.0f;
   const float local_camera_x = scene.cam_pos[0] - origin[0];
   const float local_camera_z = scene.cam_pos[2] - origin[2];
@@ -13061,10 +13585,6 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       static_cast<int32_t>(std::floor(local_camera_z / world.chunk_size));
   const int32_t cell_radius =
       static_cast<int32_t>(std::ceil(kDetailRenderDistance / world.chunk_size));
-  uint32_t candidate_chunks = 0;
-  uint32_t visible_chunks = 0;
-  uint32_t occluded_chunks = 0;
-  uint32_t draw_calls = 0;
   bool owned_occlusion_active =
       REXCVAR_GET(skate3_native_render_scene_occlusion_cull) &&
       g_r.occl_grid_valid;
@@ -13345,6 +13865,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     }
   }
 
+  }  // if (sandbox_active) - owned base-map chunks only.
+
   // MOBJ records are immutable local meshes with one authoritative runtime
   // translation shared with native collision. They are excluded from the
   // static chunks above, so moving one never leaves a rendered copy behind
@@ -13356,16 +13878,14 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           .count();
   owned_physics_clock = owned_physics_now;
   mechanics_sandbox::map::AdvanceOwnedPhysics(owned_physics_frame_seconds);
-  const skate::world::MapDefinition& definition =
-      mechanics_sandbox::map::ActiveDefinition();
-  uint32_t editor_pose_ready = 0;
-  uint32_t editor_pose_fallbacks = 0;
-  uint32_t editor_visible_objects = 0;
-  uint32_t editor_resident_objects = 0;
-  uint32_t editor_object_draws = 0;
   std::size_t editor_visual_mesh_offset = 0;
   for (std::size_t object_index = 0;
        object_index < definition.editable_objects.size(); ++object_index) {
+    // Overlay mode shows runtime spawns only - the package's own objects
+    // belong to the base map nobody is drawing.
+    if (draw_runtime_props && object_index < runtime_prop_first) {
+      continue;
+    }
     const auto& visuals =
         mechanics_sandbox::map::ActiveEditableObjectVisualMeshes(object_index);
     const std::size_t object_visual_mesh_offset = editor_visual_mesh_offset;
@@ -13431,6 +13951,27 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         origin[1] + translation[1],
         origin[2] + translation[2],
     };
+
+    // Per-prop LOD. RENDER only: the prop's collision stays registered
+    // whatever the distance, because the native collision path registers
+    // incrementally and has no removal - so unloading it here would leave a
+    // solid volume with nothing drawn, which is worse than drawing it.
+    const float lod_distance =
+        mechanics_sandbox::map::RuntimePropLodDistance(object_index);
+    if (lod_distance > 0.0f) {
+      const float to_camera[3] = {
+          world_position[0] - scene.cam_pos[0],
+          world_position[1] - scene.cam_pos[1],
+          world_position[2] - scene.cam_pos[2],
+      };
+      const float distance_squared = to_camera[0] * to_camera[0] +
+                                     to_camera[1] * to_camera[1] +
+                                     to_camera[2] * to_camera[2];
+      if (distance_squared > lod_distance * lod_distance) {
+        continue;
+      }
+    }
+
     float corners[8][3];
     for (int corner = 0; corner < 8; ++corner) {
       const skate::world::Vec3 local{
@@ -14024,6 +14565,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       ++draw_calls;
     }
   }
+  }  // if (sandbox_active || draw_runtime_props) - end of owned geometry.
+  // The multiplayer remote-item fallback proxy draw further below relies on
+  // this GPU state being bound, so it stays unconditional even in Vanilla
+  // Mode (sandbox_active == false).
   cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
   cmd->SetTexture(1, g_r.white.srv);
   cmd->SetTexture(2, g_r.white.srv);
@@ -14487,42 +15032,137 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         if (!finite || basis_energy <= 0.01f) {
           continue;
         }
+        if (canonical_bone >= 26 && canonical_bone <= 31) {
+          RecordBoardBoneWriter(canonical_bone, item->mesh, source);
+        }
         std::copy_n(source, 12, canonical.begin() + canonical_bone * 12);
       }
     }
+    ReportBoardBoneWriters(canonical);
   }
 
   // Send the final rendered palette for each ordinary skinned piece alongside
   // the coherent canonical fallback. Exact sender-owned appearance tracks
-  // take precedence on the receiver.
+  // take precedence on the receiver - but only the ones it cannot rebuild
+  // from the canonical track itself; see the derivability test below.
+  std::size_t local_capture_derivable_exact_tracks = 0;
+  std::size_t local_capture_sent_exact_tracks = 0;
+  std::array<bool, 256> local_capture_weighted_canonical{};
   if (!local_animation.tracks.empty()) {
     for (const DrawItem* item : local_player_items) {
       if (item == nullptr || !item->skinned || item->bones.empty() ||
           item->bones.size() % 12 != 0) {
         continue;
       }
+      // Which palette rows this mesh's vertices actually weight.
+      //
+      // EXHAUSTIVE, deliberately. This used to read g_skin_probe, which
+      // caches only ~32 evenly-spaced sample vertices per mesh - enough for
+      // the stretch veto it exists for, but not for deciding what is safe to
+      // leave off the wire. A bone weighted only by vertices those samples
+      // stepped over looked unweighted, and pinning it produced visible
+      // garment artifacts. The receiver has always scanned every vertex for
+      // this same question (see FindWeightedPaletteRows at the remote
+      // appearance path); the sender now agrees with it exactly.
+      const std::size_t palette_rows = item->bones.size() / 12;
+      const auto local_mesh = g_r.meshes.find(item->mesh);
+      if (local_mesh == g_r.meshes.end() ||
+          local_mesh->second.raytracing_verts.empty()) {
+        continue;
+      }
+      const multiplayer::render_cache::WeightedPaletteRows weighted =
+          multiplayer::render_cache::FindWeightedPaletteRows(
+              local_mesh->second.raytracing_verts, palette_rows);
+      if (weighted.count == 0) {
+        continue;
+      }
       std::size_t weighted_rows = 0;
-      {
-        std::lock_guard<std::mutex> lock(g_skin_probe_mutex);
-        const auto probe = g_skin_probe.find(item->mesh);
-        if (probe != g_skin_probe.end()) {
-          for (const SkinProbeSample& sample : probe->second.s) {
-            for (std::size_t influence = 0; influence < 4; ++influence) {
-              const std::uint8_t weight = static_cast<std::uint8_t>(
-                  (sample.bw >> (influence * 8)) & 0xFFu);
-              const std::uint8_t bone = static_cast<std::uint8_t>(
-                  (sample.bi >> (influence * 8)) & 0xFFu);
-              if (weight != 0) {
-                weighted_rows = std::max(weighted_rows, std::size_t(bone) + 1);
-              }
-            }
-          }
+      for (std::size_t palette_bone = 0; palette_bone < palette_rows;
+           ++palette_bone) {
+        if (weighted.used[palette_bone]) {
+          weighted_rows = palette_bone + 1;
         }
       }
       if (weighted_rows == 0) {
         continue;
       }
-      weighted_rows = std::min(weighted_rows, item->bones.size() / 12);
+
+      // Record the CANONICAL bones behind those rows. A bone nothing weights
+      // can be left off the wire for free - the receiver's unresolved-row
+      // guard only fires for weighted rows - but only if this set is
+      // complete, which is why the scan above is exhaustive.
+      {
+        native_palette::CanonicalRigSample weight_rig;
+        if (native_palette::LookupCanonicalRig(item->ctx, item->mesh,
+                                               weight_rig) &&
+            !weight_rig.palette_to_canonical.empty()) {
+          for (std::size_t palette_bone = 0;
+               palette_bone < palette_rows &&
+               palette_bone < weight_rig.palette_to_canonical.size();
+               ++palette_bone) {
+            if (!weighted.used[palette_bone]) {
+              continue;
+            }
+            const std::size_t canonical_bone =
+                weight_rig.palette_to_canonical[palette_bone];
+            if (canonical_bone < local_capture_weighted_canonical.size()) {
+              local_capture_weighted_canonical[canonical_bone] = true;
+            }
+          }
+        }
+      }
+
+      // Skip an exact track the receiver can already derive.
+      //
+      // The canonical hierarchy above is ASSEMBLED from these very palettes:
+      // the loop before this one copies each piece's final rows into the
+      // canonical array through palette_to_canonical. So for most pieces the
+      // exact track is a bit-identical second copy of rows already in the
+      // packet, and the receiver's own fallback - remap the canonical track
+      // through the piece's palette_to_canonical, which it already holds
+      // from the appearance - reconstructs it exactly.
+      //
+      // It is only genuinely needed when a piece DISAGREES with the
+      // canonical row, which happens when two pieces share a canonical bone
+      // and the later one overwrote it. Those still go out in full.
+      //
+      // Nothing changes on the receiver: an absent exact track already falls
+      // through to the canonical remap.
+      if (local_animation.tracks.front().mesh_key ==
+          multiplayer::kCanonicalSkeletonTrackKey) {
+        constexpr float kDerivableEpsilon = 1e-5f;
+        const std::vector<float>& canonical =
+            local_animation.tracks.front().bone_rows;
+        const std::size_t canonical_bones = canonical.size() / 12;
+        native_palette::CanonicalRigSample rig;
+        bool derivable =
+            native_palette::LookupCanonicalRig(item->ctx, item->mesh, rig) &&
+            !rig.palette_to_canonical.empty() &&
+            rig.palette_to_canonical.size() >= weighted_rows;
+        for (std::size_t palette_bone = 0;
+             derivable && palette_bone < weighted_rows; ++palette_bone) {
+          const std::size_t canonical_bone =
+              rig.palette_to_canonical[palette_bone];
+          if (canonical_bone >= canonical_bones) {
+            derivable = false;
+            break;
+          }
+          const float* mine = item->bones.data() + palette_bone * 12;
+          const float* theirs = canonical.data() + canonical_bone * 12;
+          for (std::size_t component = 0; component < 12; ++component) {
+            if (std::fabs(mine[component] - theirs[component]) >
+                kDerivableEpsilon) {
+              derivable = false;
+              break;
+            }
+          }
+        }
+        if (derivable) {
+          ++local_capture_derivable_exact_tracks;
+          continue;
+        }
+      }
+      ++local_capture_sent_exact_tracks;
       // Capture every live final palette as an exact track. The canonical
       // hierarchy remains in the packet for bind-skinned ROPA and fallback,
       // but a sender-owned appearance piece should consume the exact matrix
@@ -14535,6 +15175,85 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       exact_track.bone_rows.assign(item->bones.begin(),
                                    item->bones.begin() + weighted_rows * 12);
       local_animation.tracks.push_back(std::move(exact_track));
+    }
+  }
+  // Pin canonical bones that no receiver ever reads.
+  //
+  // These animate every frame, so the delta mask resends them every frame,
+  // for nobody. Pinning them to a CONSTANT - identity basis, translation at
+  // the pose root, so the quantised root-relative value is zero - makes the
+  // mask see no change and drop them from every delta. Keyframes still carry
+  // them, once a second.
+  //
+  // THE LIST IS MEASURED ON THE RECEIVER, not derived here, and that
+  // distinction cost a round of visible artifacts. The sender cannot see
+  // which bones matter: bind-skinned ROPA cloth skins straight off the
+  // canonical hierarchy and never appears as a live-palette piece, so bones
+  // only it needs - the shoulder helpers 70 and 74, and SPINE1 - looked
+  // unreferenced here and pinning them collapsed the garments. This set
+  // comes from multiplayer-consumed-bones, which records what a receiver
+  // actually resolves across every piece, ROPA included.
+  //
+  // Measured with one outfit. The structural entries (0 TRAJECTORY, 66-69
+  // reparented duplicates, 78/80 unused helpers) hold for any outfit; the
+  // face entries could in principle be weighted by a head or hair mesh this
+  // measurement never saw. Disable the cvar if a remote player's face or
+  // hair ever looks wrong.
+  if (REXCVAR_GET(skate3_multiplayer_pin_unused_bones) &&
+      !local_animation.tracks.empty() &&
+      local_animation.tracks.front().mesh_key ==
+          multiplayer::kCanonicalSkeletonTrackKey) {
+    static constexpr std::size_t kNeverConsumedBones[] = {
+        0,  66, 67, 68, 69, 78, 80, 83, 85, 87, 88, 89, 90,
+        91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 103};
+    std::vector<float>& canonical = local_animation.tracks.front().bone_rows;
+    const std::size_t canonical_bones = canonical.size() / 12;
+    for (const std::size_t bone : kNeverConsumedBones) {
+      if (bone >= canonical_bones) {
+        continue;
+      }
+      float* rows = canonical.data() + bone * 12;
+      for (std::size_t row = 0; row < 3; ++row) {
+        for (std::size_t column = 0; column < 3; ++column) {
+          rows[row * 4 + column] = row == column ? 1.0f : 0.0f;
+        }
+        rows[row * 4 + 3] = local_animation.root_position[row];
+      }
+    }
+  }
+
+  if (local_capture_derivable_exact_tracks + local_capture_sent_exact_tracks >
+      0) {
+    static std::atomic<std::uint64_t> s_last_exact_log_ns{0};
+    const std::uint64_t now_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    std::uint64_t previous = s_last_exact_log_ns.load(std::memory_order_relaxed);
+    if (now_ns - previous > 5'000'000'000ull &&
+        s_last_exact_log_ns.compare_exchange_strong(
+            previous, now_ns, std::memory_order_relaxed)) {
+      const std::size_t canonical_bone_count =
+          local_animation.tracks.empty()
+              ? 0
+              : local_animation.tracks.front().bone_rows.size() / 12;
+      std::string weighted;
+      std::size_t weighted_count = 0;
+      for (std::size_t bone = 0; bone < canonical_bone_count &&
+                                 bone < local_capture_weighted_canonical.size();
+           ++bone) {
+        if (!local_capture_weighted_canonical[bone]) {
+          continue;
+        }
+        ++weighted_count;
+        weighted += (weighted.empty() ? "" : ",") + std::to_string(bone);
+      }
+      REXLOG_INFO(
+          "multiplayer-exact-tracks: derivable={} sent={} canonical_bones={} "
+          "weighted_bones={} weighted=[{}]",
+          local_capture_derivable_exact_tracks,
+          local_capture_sent_exact_tracks, canonical_bone_count,
+          weighted_count, weighted);
     }
   }
   RecordLocalVisibleMotion(local_player_items, scene,
@@ -14647,8 +15366,17 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   g_pw_mp_local_appearance.Add(PerfNsSince(local_appearance_t0));
   multiplayer::RemotePresentationFrame remote_presentation;
   const auto multiplayer_tick_t0 = PerfClock::now();
+  // mechanics_sandbox::map::ActiveMapName() is a lazily-loaded singleton
+  // that always reports *some* owned-map package name, independent of
+  // whether that map is actually the active world mode. Off sandbox mode
+  // (Vanilla Mode) use a fixed, distinct identity instead, so Vanilla-Mode
+  // peers pair with each other and never collide with an unrelated
+  // sandbox-map session's hash.
+  const char *multiplayer_map_name =
+      sandbox_active ? mechanics_sandbox::map::ActiveMapName()
+                     : "vanilla:university";
   const bool have_remote_players = multiplayer::TickLocalVisuals(
-          mechanics_sandbox::map::ActiveMapName(), origin,
+          multiplayer_map_name, origin,
       local_animation.tracks.empty() && !local_animation.presentation_root_valid
               ? nullptr
               : &local_animation,
@@ -14657,6 +15385,12 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               : nullptr,
           remote_presentation);
   RecordRemotePresentationHandoff(remote_presentation);
+  // Published unconditionally, whether or not this frame's presentation
+  // changed - PublishLatestRemotePlayers is one atomic store either way,
+  // and a Lua native calling LatestRemotePlayers() from another thread
+  // wants "what the game most recently knew", not "only the frames where
+  // something moved".
+  multiplayer::PublishLatestRemotePlayers(remote_presentation.players);
   g_pw_mp_tick.Add(PerfNsSince(multiplayer_tick_t0));
   const auto multiplayer_remote_t0 = PerfClock::now();
   uint64_t multiplayer_install_ns = 0;
@@ -14908,6 +15642,16 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         std::size_t network_invalid_bones = 0;
         std::size_t network_unresolved_active_bones = 0;
         std::size_t skipped_skinned_items = 0;
+        // A piece that PASSES the atomicity/resolution checks above (every
+        // referenced bone found something) but whose resulting bone
+        // matrices are all collapsed near the world origin - "resolved,
+        // to the WRONG data" rather than "failed to resolve", which
+        // remapped_skinned_items/skipped_skinned_items cannot distinguish
+        // from a correctly posed skater. This is the specific shape the
+        // code's own comment above warns a partial/wrong resolution
+        // produces ("stretched hair and garments collapsing toward the
+        // origin") - counted here instead of only described in a comment.
+        std::size_t degenerate_bone_items = 0;
           std::size_t cached_track_hits = canonical_track_cache_hit ? 1 : 0;
           std::size_t track_scans = canonical_track_cache_hit ? 0 : 1;
         std::size_t runtime_weighted_scans = 0;
@@ -15080,6 +15824,17 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                   network_bone =
                         canonical_track->bone_rows.data() + canonical_bone * 12;
                 }
+                // Which canonical bones a RECEIVER actually consumes.
+                //
+                // The sender cannot answer this: bind-skinned ROPA garments
+                // skin straight off the canonical hierarchy and never appear
+                // as a live-palette piece there, so bones only they need
+                // look unreferenced and pinning them collapses the cloth.
+                // Here every piece is resolved, ROPA included, so this is
+                // the authoritative "must be transmitted" set.
+                if (canonical_bone < 256 && weighted_rows.used[palette_bone]) {
+                  RecordConsumedCanonicalBone(canonical_bone);
+                }
               }
               if (network_bone != nullptr) {
                   ++network_candidate_bones;
@@ -15163,6 +15918,26 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                   AppearanceHashBytes(applied_palette_hash, clone.bones.data(),
                 clone.bones.size() * sizeof(float));
             applied_palette_bones += bone_count;
+          }
+          if (clone.skinned && !clone.bones.empty()) {
+            // Translation is column 3 of each bone's 3x4 affine row set
+            // (indices 3, 7, 11 within each 12-float group - the same
+            // layout AppearanceHashBytes above just hashed wholesale).
+            // Every bone within a few centimetres of the world origin
+            // simultaneously is not a real pose; a skater is never
+            // actually standing at (0,0,0) mid-session.
+            float max_abs_translation = 0.0f;
+            for (std::size_t bone = 0; bone * 12 + 11 < clone.bones.size();
+                ++bone) {
+              for (std::size_t component : {3, 7, 11}) {
+                max_abs_translation = std::max(
+                    max_abs_translation,
+                    std::fabs(clone.bones[bone * 12 + component]));
+              }
+            }
+            if (max_abs_translation < 0.05f) {
+              ++degenerate_bone_items;
+            }
           }
           if (clone.skinned && !clone.hair && !clone.ropa &&
               !skateboard_piece) {
@@ -15259,6 +16034,74 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           s_bone_gate = {};
           s_bone_gate.last_log = bone_gate_now;
         }
+
+        // Per-ROLE render health, rate-limited - added to chase "one peer
+        // renders as a box for one specific observing client and never
+        // recovers" (a real report; multiplayer-visual-state showed that
+        // peer's mode flag flip back to "appearance" and stay there, yet
+        // the box persisted, meaning whatever is wrong lives downstream of
+        // that flag). s_bone_gate above cannot see this: it AVERAGES every
+        // peer together, so one peer failing every frame while three
+        // others succeed still reports as "mostly fine" in aggregate. This
+        // is the same counters, kept separately per role instead.
+        struct PerRoleAppearanceDiag {
+          std::chrono::steady_clock::time_point last_log{};
+          std::uint64_t frames = 0;
+          std::uint64_t items_drawn = 0;
+          std::uint64_t items_available = 0;
+          std::uint64_t remapped = 0;
+          std::uint64_t skipped = 0;
+          std::uint64_t missing_mesh = 0;
+          std::uint64_t degenerate_bones = 0;
+        };
+        static std::unordered_map<uint32_t, PerRoleAppearanceDiag>
+            s_per_role_diag;
+        PerRoleAppearanceDiag& role_diag = s_per_role_diag[remote_player.role];
+        ++role_diag.frames;
+        role_diag.items_drawn +=
+            multiplayer_remote_items->size() - remote_item_start;
+        role_diag.items_available += appearance_items->size();
+        role_diag.remapped += remapped_skinned_items;
+        role_diag.skipped += skipped_skinned_items;
+        role_diag.degenerate_bones += degenerate_bone_items;
+        // Distinct from the bone/rig checks above: this catches a mesh
+        // that installed fine but was LATER evicted from the GPU mesh
+        // cache (skate3_native_scene_gpu.cpp's own store-size eviction),
+        // which none of the bone-resolution counters would ever see - the
+        // bones can resolve perfectly against a mesh that silently isn't
+        // there to draw anymore.
+        for (const DrawItem& source_item : *appearance_items) {
+          if (!g_r.meshes.contains(source_item.mesh)) {
+            ++role_diag.missing_mesh;
+          }
+        }
+        const auto role_diag_now = std::chrono::steady_clock::now();
+        if (role_diag.last_log == std::chrono::steady_clock::time_point{}) {
+          role_diag.last_log = role_diag_now;
+        }
+        if (role_diag_now - role_diag.last_log >= std::chrono::seconds(2)) {
+          const double role_divisor =
+              static_cast<double>(std::max<std::uint64_t>(role_diag.frames, 1));
+          REXLOG_INFO(
+              "multiplayer-role-health: role={} session={} frames={} "
+              "items_drawn={:.2f}/frame available={:.2f}/frame "
+              "remapped={:.2f}/frame skipped={:.2f}/frame "
+              "missing_mesh={:.2f}/frame degenerate_bones={:.2f}/frame "
+              "mode={}",
+              remote_player.role, remote_player.session, role_diag.frames,
+              double(role_diag.items_drawn) / role_divisor,
+              double(role_diag.items_available) / role_divisor,
+              double(role_diag.remapped) / role_divisor,
+              double(role_diag.skipped) / role_divisor,
+              double(role_diag.missing_mesh) / role_divisor,
+              double(role_diag.degenerate_bones) / role_divisor,
+              multiplayer_remote_items->size() > remote_item_start
+                  ? "appearance"
+                  : "proxy");
+          role_diag = {};
+          role_diag.last_log = role_diag_now;
+        }
+
         replicated_real_skater =
             multiplayer_remote_items->size() > remote_item_start;
       }
@@ -15624,6 +16467,11 @@ void DrawSandboxSky(const NativeGuestOutputRenderContext& context,
 
 bool RenderScene(const NativeGuestOutputRenderContext& output_context,
                  void* /*user_data*/) {
+  // The only per-frame hook available to the client Lua script host - runs
+  // unconditionally, ahead of every yield/early-return below, so scripts
+  // still tick during menus/loading.
+  skate3::lua_client::Tick();
+  skate3::retail_ui::Tick();
   NativeGuestOutputRenderContext context = output_context;
   if (!SceneEnabled() ||
       (context.backend != NativeGuestOutputBackend::kD3D12 &&
@@ -16768,6 +17616,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
       it->second.recheck_frame =
           frame_number +
           (g_in_menus_frame.load(std::memory_order_relaxed) ? 2 : 16);
+      // Same exemption as the settle path: a remote appearance's content is
+      // not in guest memory, so a fingerprint change there says nothing
+      // about it and healing from that memory destroys it.
+      if (g_r.remote_appearance_textures.contains(key)) {
+        return it;
+      }
       const uint64_t fp = SampleProbeFingerprint(base, it->second);
       const bool fp_new = fp != 0 && fp != it->second.payload_fp;
       if (it->second.recheck_count < 3) {
@@ -17043,7 +17897,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
       }
       const bool trm = g_trace_mesh_addr != 0 && item.mesh == g_trace_mesh_addr;
       auto rit = g_r.tex_routes.find(tex_ptr);
-      if (!item.retained) {
+      // An appearance route is authoritative: its decode came off the
+      // network, so the live words at this guest object describe something
+      // else entirely and must not be allowed to reroute it.
+      const bool appearance_route =
+          rit != g_r.tex_routes.end() && rit->second.appearance;
+      if (!item.retained && !appearance_route) {
         // Route refresh: seqlock-stable read of the live fetch words (a
         // mid-rewrite mixed snapshot must never become a key; it would
         // decode a coherent image of the WRONG memory, the pool-page
@@ -20417,6 +21276,14 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
     ApplyMenuBlurPass(context, cmd, menu_blur_target,
                       /*output_in_guest_output_state=*/false);
   }
+
+  // Lua dev console (F7). Drawn last so it sits above the blur/backdrop
+  // passes above; no-op when hidden. Shared with the emulated-output
+  // post-processor path (PostProcessGuestOutput).
+  // NUI first, dev console second: the developer console must stay
+  // readable on top of whatever UI a resource is drawing.
+  DrawNuiOverlay(context, cmd, /*output_in_guest_output_state=*/false);
+  DrawDevConsoleOverlay(context, cmd, /*output_in_guest_output_state=*/false);
 
   cmd->Barrier(context.guest_output, nrhi::ResourceState::kRenderTarget,
                nrhi::ResourceState::kGuestOutput);

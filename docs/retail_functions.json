@@ -1,0 +1,2141 @@
+{
+  "$schema_notes": "Retail Skate 3 functions this project actually touches, extracted from the source rather than from a research database. Every entry is grounded in a real reference: the address appears in the code at the listed lines. This is NOT a complete list of the game's functions - the recompiler emits 47,652 of them - it is the subset the engine layer hooks or calls, which is the subset that is actually usable today.",
+  "generated_at": "2026-09-12",
+  "generated_by": "scripts/extract_retail_functions.py over src/, tools/ and the codegen patch list",
+  "relationship_meanings": {
+    "hooked": "the project replaces or observes it (a REX_FUNC override, or an injected codegen patch)",
+    "called": "the project calls or references it, but does not intercept it"
+  },
+  "caveats": [
+    "A `name` comes from the nearest preceding comment and is a COMMUNITY or hand-derived label, not a symbol from the binary - the game ships no symbols. Treat it as a hypothesis with provenance, which is how the source itself treats these.",
+    "An entry with no name is still real; it simply has no naming comment near its use.",
+    "Addresses are TU3 (title update 3) guest addresses and mean nothing against another build."
+  ],
+  "counts": {
+    "total": 219,
+    "hooked": 173,
+    "called": 46,
+    "named": 54,
+    "recompiled_functions_in_build": 47652
+  },
+  "functions": [
+    {
+      "address": "0x823C3B00",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 11,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:874",
+        "src/skate3_cac_gesture.cpp:87",
+        "src/skate3_custom_trick.cpp:1026",
+        "src/skate3_custom_trick.cpp:1101",
+        "src/skate3_custom_trick.cpp:1156",
+        "src/skate3_custom_trick.cpp:1329"
+      ]
+    },
+    {
+      "address": "0x82455030",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 3,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:866",
+        "src/skate3_trick_pipeline.cpp:1337",
+        "src/skate3_trick_pipeline.cpp:1363"
+      ]
+    },
+    {
+      "address": "0x8246DE38",
+      "name": "Sk8::AI::PathController::GeneratePhysicsInput",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_owned_world_boundary.cpp:479"
+      ]
+    },
+    {
+      "address": "0x8247AA88",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_draw_distance.cpp:342"
+      ]
+    },
+    {
+      "address": "0x8247AC48",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_draw_distance.cpp:350"
+      ]
+    },
+    {
+      "address": "0x8247B3A0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_draw_distance.cpp:373"
+      ]
+    },
+    {
+      "address": "0x8247BB50",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_draw_distance.cpp:705"
+      ]
+    },
+    {
+      "address": "0x8247BD28",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_draw_distance.cpp:713"
+      ]
+    },
+    {
+      "address": "0x8247DCF0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_draw_distance.cpp:669"
+      ]
+    },
+    {
+      "address": "0x82495828",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_vanilla_ui/skate3_ui_audio.cpp:117"
+      ]
+    },
+    {
+      "address": "0x824FD4B0",
+      "name": "Sk8::BE::ScreenshotBackEnd",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:698"
+      ]
+    },
+    {
+      "address": "0x824FD550",
+      "name": "Sk8::BE::ScreenshotBackEnd::GrabScreenshot",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/skate3_native_render.cpp:677",
+        "src/skate3_native_scene_gpu.cpp:6799"
+      ]
+    },
+    {
+      "address": "0x82532E58",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1985"
+      ]
+    },
+    {
+      "address": "0x82532F60",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1989"
+      ]
+    },
+    {
+      "address": "0x82533278",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1993"
+      ]
+    },
+    {
+      "address": "0x82533380",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1997"
+      ]
+    },
+    {
+      "address": "0x82549888",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 3,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1399",
+        "cmake/ApplySkate3CodegenPatches.cmake:1402",
+        "src/skate3_trick_pipeline.cpp:4692"
+      ]
+    },
+    {
+      "address": "0x825623F0",
+      "name": "Sk8::Challenge::PhotoReplayController::Update",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/skate3_native_render.cpp:646",
+        "src/skate3_native_scene_gpu.cpp:6683"
+      ]
+    },
+    {
+      "address": "0x82580980",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2042"
+      ]
+    },
+    {
+      "address": "0x82580E68",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2046"
+      ]
+    },
+    {
+      "address": "0x825810B0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2050"
+      ]
+    },
+    {
+      "address": "0x82581698",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2054"
+      ]
+    },
+    {
+      "address": "0x82581918",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2058"
+      ]
+    },
+    {
+      "address": "0x82582410",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2062"
+      ]
+    },
+    {
+      "address": "0x825876D0",
+      "name": "Dmo::SimManager::SpawnStatic",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_owned_world_boundary.cpp:359"
+      ]
+    },
+    {
+      "address": "0x8258FB30",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_cac_gesture.cpp:296"
+      ]
+    },
+    {
+      "address": "0x8258FB48",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2001",
+        "src/skate3_cac_gesture.cpp:328"
+      ]
+    },
+    {
+      "address": "0x82590B50",
+      "name": "Sk8::GetCACSettings",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_cac_gesture.cpp:334"
+      ]
+    },
+    {
+      "address": "0x82592990",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_owned_world_boundary.cpp:261"
+      ]
+    },
+    {
+      "address": "0x825953B0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2130"
+      ]
+    },
+    {
+      "address": "0x82598600",
+      "name": "Sk8::SkaterManager::SpawnAi",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_owned_world_boundary.cpp:409"
+      ]
+    },
+    {
+      "address": "0x82598B30",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_trick_pipeline.cpp:1107"
+      ]
+    },
+    {
+      "address": "0x825999F0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:862"
+      ]
+    },
+    {
+      "address": "0x8259C9B0",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_input_lab.cpp:1241"
+      ]
+    },
+    {
+      "address": "0x825D4490",
+      "name": "Sk8::FE::AptMovieIntegration::Render",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:910"
+      ]
+    },
+    {
+      "address": "0x825D4E50",
+      "name": "Sk8::FE::AptRenderingIntegration::UpdateRenderToTexture",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:921"
+      ]
+    },
+    {
+      "address": "0x825D60C8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1811",
+        "cmake/ApplySkate3CodegenPatches.cmake:1829"
+      ]
+    },
+    {
+      "address": "0x825D67D8",
+      "name": "Sk8::FE::FrontEndManager::Render2D",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:901"
+      ]
+    },
+    {
+      "address": "0x825D9168",
+      "name": "Sk8::FE::AptRenderingIntegration",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:893"
+      ]
+    },
+    {
+      "address": "0x825E0510",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1815"
+      ]
+    },
+    {
+      "address": "0x825E51A0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1174"
+      ]
+    },
+    {
+      "address": "0x82609050",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 2,
+      "references": [
+        "src/skate3_demo_path.cpp:288",
+        "src/skate3_demo_path.cpp:297"
+      ]
+    },
+    {
+      "address": "0x82609238",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 2,
+      "references": [
+        "src/skate3_demo_path.cpp:341",
+        "src/skate3_demo_path.cpp:345"
+      ]
+    },
+    {
+      "address": "0x826147C8",
+      "name": "Sk8::FE::FrontEndState_Replay2::TakePhoto",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:660"
+      ]
+    },
+    {
+      "address": "0x82639400",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_demo_path.cpp:446"
+      ]
+    },
+    {
+      "address": "0x82639440",
+      "name": "FrontEndState_LanguageSelect::OnEvent",
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_demo_path.cpp:437"
+      ]
+    },
+    {
+      "address": "0x8263C498",
+      "name": "VideoRenderer_RwTexture::Render",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:805"
+      ]
+    },
+    {
+      "address": "0x8263E788",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_demo_path.cpp:329"
+      ]
+    },
+    {
+      "address": "0x8263E810",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_demo_path.cpp:325"
+      ]
+    },
+    {
+      "address": "0x82699230",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1663",
+        "cmake/ApplySkate3CodegenPatches.cmake:1667",
+        "cmake/ApplySkate3CodegenPatches.cmake:1671",
+        "cmake/ApplySkate3CodegenPatches.cmake:1674"
+      ]
+    },
+    {
+      "address": "0x826B8038",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_owned_world_boundary.cpp:370"
+      ]
+    },
+    {
+      "address": "0x826DF2C8",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_demo_path.cpp:408"
+      ]
+    },
+    {
+      "address": "0x826DFB30",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_demo_path.cpp:392"
+      ]
+    },
+    {
+      "address": "0x826FDD70",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_demo_path.cpp:223"
+      ]
+    },
+    {
+      "address": "0x826FE1D8",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_demo_path.cpp:238"
+      ]
+    },
+    {
+      "address": "0x826FE4A8",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_demo_path.cpp:375"
+      ]
+    },
+    {
+      "address": "0x826FE638",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_demo_path.cpp:274"
+      ]
+    },
+    {
+      "address": "0x8276CB18",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 7,
+      "references": [
+        "src/skate3_native_collision.cpp:1778",
+        "src/skate3_native_collision.cpp:1905",
+        "src/skate3_native_collision.cpp:4065",
+        "src/skate3_native_collision.cpp:4362",
+        "src/skate3_native_collision.cpp:4692",
+        "src/skate3_native_collision.cpp:5475"
+      ]
+    },
+    {
+      "address": "0x8276CC70",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:809"
+      ]
+    },
+    {
+      "address": "0x8276CE90",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:813"
+      ]
+    },
+    {
+      "address": "0x8276D510",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 3,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:626",
+        "cmake/ApplySkate3CodegenPatches.cmake:630",
+        "src/skate3_native_collision.cpp:2404"
+      ]
+    },
+    {
+      "address": "0x82770650",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:817"
+      ]
+    },
+    {
+      "address": "0x82770B40",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:821"
+      ]
+    },
+    {
+      "address": "0x827719B8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 5,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:393",
+        "cmake/ApplySkate3CodegenPatches.cmake:507",
+        "cmake/ApplySkate3CodegenPatches.cmake:554",
+        "cmake/ApplySkate3CodegenPatches.cmake:620",
+        "cmake/ApplySkate3CodegenPatches.cmake:801"
+      ]
+    },
+    {
+      "address": "0x82772028",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:805"
+      ]
+    },
+    {
+      "address": "0x82775CB8",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_collision.cpp:758"
+      ]
+    },
+    {
+      "address": "0x82775F58",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 8,
+      "references": [
+        "src/skate3_native_collision.cpp:1883",
+        "src/skate3_native_collision.cpp:3725",
+        "src/skate3_native_collision.cpp:3959",
+        "src/skate3_native_collision.cpp:4338",
+        "src/skate3_native_collision.cpp:4559",
+        "src/skate3_native_collision.cpp:4576"
+      ]
+    },
+    {
+      "address": "0x82775FC8",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 3,
+      "references": [
+        "src/skate3_native_collision.cpp:1453",
+        "src/skate3_native_collision.cpp:1834",
+        "src/skate3_native_collision.cpp:4542"
+      ]
+    },
+    {
+      "address": "0x82776B58",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 3,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:343",
+        "cmake/ApplySkate3CodegenPatches.cmake:347",
+        "cmake/ApplySkate3CodegenPatches.cmake:350"
+      ]
+    },
+    {
+      "address": "0x827825B0",
+      "name": "Sk8::SkaterPresEntity::StartJobs",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:496"
+      ]
+    },
+    {
+      "address": "0x82782818",
+      "name": "Sk8::SkaterPresEntity::EndJobs",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:521"
+      ]
+    },
+    {
+      "address": "0x82783038",
+      "name": "Sk8::SkaterPresEntity::DoubleBuffer",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/native/skate3_native_entity.h:64",
+        "src/skate3_native_render.cpp:509"
+      ]
+    },
+    {
+      "address": "0x82783D68",
+      "name": "Sk8::SkaterPresEntity",
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "src/native/skate3_native_entity.cpp:73",
+        "src/native/skate3_native_entity.h:21",
+        "src/native/skate3_native_entity.h:43",
+        "src/skate3_native_render.cpp:576"
+      ]
+    },
+    {
+      "address": "0x82785260",
+      "name": "Sk8::SkaterPresEntity",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/native/skate3_native_entity.h:44",
+        "src/skate3_native_render.cpp:585"
+      ]
+    },
+    {
+      "address": "0x82785528",
+      "name": "EntClass::kCac",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/native/skate3_native_entity.h:46",
+        "src/skate3_native_render.cpp:603"
+      ]
+    },
+    {
+      "address": "0x82785778",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:531"
+      ]
+    },
+    {
+      "address": "0x82791290",
+      "name": "Sk8::WorldPresentation::AddRenderInstance",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/skate3_native_render.cpp:818",
+        "src/skate3_native_scene.cpp:2901"
+      ]
+    },
+    {
+      "address": "0x82792900",
+      "name": "Sk8::VectorizedCullingJob",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/skate3_draw_distance.cpp:15",
+        "src/skate3_draw_distance.cpp:313"
+      ]
+    },
+    {
+      "address": "0x82793F70",
+      "name": "EntClass::kColorized",
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "src/native/skate3_native_entity.cpp:74",
+        "src/native/skate3_native_entity.h:24",
+        "src/native/skate3_native_entity.h:45",
+        "src/skate3_native_render.cpp:594"
+      ]
+    },
+    {
+      "address": "0x82795AD8",
+      "name": "D3D::SetPending_AluConstants",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:396"
+      ]
+    },
+    {
+      "address": "0x827A52C8",
+      "name": "Sk8::UpdateBoneTransforms",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:470"
+      ]
+    },
+    {
+      "address": "0x827A6658",
+      "name": "Sk8::PresentationEntity::BindConstants",
+      "relationship": "hooked",
+      "reference_count": 5,
+      "references": [
+        "src/native/skate3_native_entity.cpp:3",
+        "src/native/skate3_native_entity.cpp:73",
+        "src/native/skate3_native_entity.h:49",
+        "src/native/skate3_native_entity.h:7",
+        "src/skate3_native_render.cpp:565"
+      ]
+    },
+    {
+      "address": "0x827A68B0",
+      "name": "Lifecycle::kHotReload",
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/native/skate3_native_entity.cpp:74"
+      ]
+    },
+    {
+      "address": "0x827A6C50",
+      "name": "Sk8::RenderPresentation::AddEntityToRenderViews",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/native/skate3_native_entity.h:59",
+        "src/skate3_native_render.cpp:541"
+      ]
+    },
+    {
+      "address": "0x827A6CE8",
+      "name": "Sk8::RenderPresentation::AddEntityToRenderViews",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/native/skate3_native_entity.h:59",
+        "src/skate3_native_render.cpp:549"
+      ]
+    },
+    {
+      "address": "0x827C1188",
+      "name": "Sk8::cLivingWorldPresEntity::Update",
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "src/native/skate3_native_lw.cpp:4",
+        "src/native/skate3_native_lw.h:23",
+        "src/native/skate3_native_lw.h:8",
+        "src/skate3_native_render.cpp:486"
+      ]
+    },
+    {
+      "address": "0x827C1720",
+      "name": "EntClass::kSkaterAux",
+      "relationship": "hooked",
+      "reference_count": 5,
+      "references": [
+        "src/native/skate3_native_entity.h:42",
+        "src/native/skate3_native_lw.cpp:49",
+        "src/native/skate3_native_lw.cpp:9",
+        "src/native/skate3_native_lw.h:13",
+        "src/skate3_native_render.cpp:612"
+      ]
+    },
+    {
+      "address": "0x827C1D38",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/native/skate3_native_lw.h:35",
+        "src/skate3_native_render.cpp:1016"
+      ]
+    },
+    {
+      "address": "0x827E1AD8",
+      "name": "SceneRenderView::GetLODDistancesFromAttrib",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/skate3_draw_distance.cpp:25",
+        "src/skate3_draw_distance.cpp:725"
+      ]
+    },
+    {
+      "address": "0x827E5B30",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:458"
+      ]
+    },
+    {
+      "address": "0x827F0D00",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:737"
+      ]
+    },
+    {
+      "address": "0x827FAEA8",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_scene.h:705"
+      ]
+    },
+    {
+      "address": "0x827FAF50",
+      "name": "SceneRenderView::Render",
+      "relationship": "hooked",
+      "reference_count": 3,
+      "references": [
+        "src/skate3_native_render.cpp:410",
+        "src/skate3_native_render.cpp:413",
+        "src/skate3_native_render.cpp:95"
+      ]
+    },
+    {
+      "address": "0x82802A00",
+      "name": "Sk8::Render::ViewCamera::SetViewMatrix",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_scene.cpp:10681"
+      ]
+    },
+    {
+      "address": "0x82804168",
+      "name": "Sk8::Render::SimpleDraw::DrawParameters::Draw",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:948"
+      ]
+    },
+    {
+      "address": "0x82808388",
+      "name": "Sk8::Render::cFont::DrawstringLocal",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:931"
+      ]
+    },
+    {
+      "address": "0x82808708",
+      "name": "Sk8::Render::cFont::DrawstringLocal",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:938"
+      ]
+    },
+    {
+      "address": "0x828235F0",
+      "name": "SceneBinDirectory::IsSceneWithDMOsEnabled",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_owned_world_boundary.cpp:347"
+      ]
+    },
+    {
+      "address": "0x828248E8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1187"
+      ]
+    },
+    {
+      "address": "0x82824BC8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1191"
+      ]
+    },
+    {
+      "address": "0x82825060",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1183"
+      ]
+    },
+    {
+      "address": "0x828254A0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1179"
+      ]
+    },
+    {
+      "address": "0x8284A950",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_mechanics_sandbox.cpp:1054"
+      ]
+    },
+    {
+      "address": "0x82858810",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1394"
+      ]
+    },
+    {
+      "address": "0x8288DC58",
+      "name": "Sk8::VectorizedCullingJob",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/skate3_draw_distance.cpp:299",
+        "src/skate3_draw_distance.cpp:8"
+      ]
+    },
+    {
+      "address": "0x828AAE90",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1262",
+        "cmake/ApplySkate3CodegenPatches.cmake:1265"
+      ]
+    },
+    {
+      "address": "0x828D9378",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2074"
+      ]
+    },
+    {
+      "address": "0x82963510",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:631"
+      ]
+    },
+    {
+      "address": "0x82965630",
+      "name": "IList::Find",
+      "relationship": "called",
+      "reference_count": 4,
+      "references": [
+        "src/skate3_cac_gesture.cpp:200",
+        "src/skate3_custom_trick.cpp:462",
+        "src/skate3_input_lab.cpp:481",
+        "src/skate3_trick_pipeline.cpp:1018"
+      ]
+    },
+    {
+      "address": "0x82966F30",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1630",
+        "cmake/ApplySkate3CodegenPatches.cmake:1634",
+        "cmake/ApplySkate3CodegenPatches.cmake:1638",
+        "cmake/ApplySkate3CodegenPatches.cmake:1641"
+      ]
+    },
+    {
+      "address": "0x8296D0D0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1566",
+        "cmake/ApplySkate3CodegenPatches.cmake:1570",
+        "cmake/ApplySkate3CodegenPatches.cmake:1574",
+        "cmake/ApplySkate3CodegenPatches.cmake:1577"
+      ]
+    },
+    {
+      "address": "0x8296D288",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1534",
+        "cmake/ApplySkate3CodegenPatches.cmake:1538",
+        "cmake/ApplySkate3CodegenPatches.cmake:1542",
+        "cmake/ApplySkate3CodegenPatches.cmake:1545"
+      ]
+    },
+    {
+      "address": "0x8296D5F8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1598",
+        "cmake/ApplySkate3CodegenPatches.cmake:1602",
+        "cmake/ApplySkate3CodegenPatches.cmake:1606",
+        "cmake/ApplySkate3CodegenPatches.cmake:1609"
+      ]
+    },
+    {
+      "address": "0x8298F430",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1195",
+        "cmake/ApplySkate3CodegenPatches.cmake:1248",
+        "cmake/ApplySkate3CodegenPatches.cmake:1251",
+        "cmake/ApplySkate3CodegenPatches.cmake:2070"
+      ]
+    },
+    {
+      "address": "0x82A7DC20",
+      "name": "ScreenshotBackEnd::GrabScreenshot",
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_scene_gpu.cpp:6799"
+      ]
+    },
+    {
+      "address": "0x82A83080",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2066"
+      ]
+    },
+    {
+      "address": "0x82A8A018",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1215"
+      ]
+    },
+    {
+      "address": "0x82A92DC8",
+      "name": "MovieDecoder::Decode",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:794"
+      ]
+    },
+    {
+      "address": "0x82ACA170",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:436",
+        "cmake/ApplySkate3CodegenPatches.cmake:441",
+        "cmake/ApplySkate3CodegenPatches.cmake:454",
+        "cmake/ApplySkate3CodegenPatches.cmake:459"
+      ]
+    },
+    {
+      "address": "0x82AD3CD8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 3,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:685",
+        "cmake/ApplySkate3CodegenPatches.cmake:690",
+        "cmake/ApplySkate3CodegenPatches.cmake:695"
+      ]
+    },
+    {
+      "address": "0x82AD7740",
+      "name": "State::BuildFailed",
+      "relationship": "called",
+      "reference_count": 6,
+      "references": [
+        "src/skate3_native_collision.cpp:3623",
+        "src/skate3_native_collision.cpp:3934",
+        "src/skate3_native_collision.cpp:4127",
+        "src/skate3_native_collision.cpp:4488",
+        "src/skate3_native_collision.cpp:5289",
+        "src/skate3_native_collision.cpp:5689"
+      ]
+    },
+    {
+      "address": "0x82ADF5D8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:473",
+        "cmake/ApplySkate3CodegenPatches.cmake:476",
+        "cmake/ApplySkate3CodegenPatches.cmake:514",
+        "cmake/ApplySkate3CodegenPatches.cmake:519"
+      ]
+    },
+    {
+      "address": "0x82B69B08",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2078",
+        "src/skate3_dlc_runtime.cpp:60"
+      ]
+    },
+    {
+      "address": "0x82B74310",
+      "name": "D3D::SetPending_RenderStates",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:982"
+      ]
+    },
+    {
+      "address": "0x82B769C0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:989"
+      ]
+    },
+    {
+      "address": "0x82B78FF0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:847"
+      ]
+    },
+    {
+      "address": "0x82B79190",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:840"
+      ]
+    },
+    {
+      "address": "0x82B79FC0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:998"
+      ]
+    },
+    {
+      "address": "0x82B7A970",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:872"
+      ]
+    },
+    {
+      "address": "0x82B7AD68",
+      "name": "D3D::SetPending_AluConstants",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "src/skate3_native_render.cpp:390",
+        "src/skate3_native_render.cpp:858"
+      ]
+    },
+    {
+      "address": "0x82B7F150",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:964"
+      ]
+    },
+    {
+      "address": "0x82B7F408",
+      "name": "Sk8::Render::SimpleDraw::DrawParameters::Draw",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:957"
+      ]
+    },
+    {
+      "address": "0x82B82E08",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:435"
+      ]
+    },
+    {
+      "address": "0x82B83C48",
+      "name": "D3D::SetPending_RenderStates",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:973"
+      ]
+    },
+    {
+      "address": "0x82B83FE0",
+      "name": "D3D::SetPending_AluConstants",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:829"
+      ]
+    },
+    {
+      "address": "0x82B938D8",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 2,
+      "references": [
+        "src/skate3_mechanics_sandbox.cpp:1122",
+        "src/skate3_mechanics_sandbox.cpp:1163"
+      ]
+    },
+    {
+      "address": "0x82B98F70",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:870"
+      ]
+    },
+    {
+      "address": "0x82BA07F0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1345",
+        "cmake/ApplySkate3CodegenPatches.cmake:878"
+      ]
+    },
+    {
+      "address": "0x82BA16F0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1138"
+      ]
+    },
+    {
+      "address": "0x82BA1C30",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:882"
+      ]
+    },
+    {
+      "address": "0x82BA4400",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1110"
+      ]
+    },
+    {
+      "address": "0x82BA5D30",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1130"
+      ]
+    },
+    {
+      "address": "0x82BA69F0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1134"
+      ]
+    },
+    {
+      "address": "0x82BAA320",
+      "name": "Sk8::Behaviours::CharacterGesture",
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_cac_gesture.cpp:188"
+      ]
+    },
+    {
+      "address": "0x82BAB080",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2095"
+      ]
+    },
+    {
+      "address": "0x82BACBE0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1142"
+      ]
+    },
+    {
+      "address": "0x82BACC30",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1146"
+      ]
+    },
+    {
+      "address": "0x82BB5188",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1432",
+        "src/skate3_custom_trick.cpp:700"
+      ]
+    },
+    {
+      "address": "0x82BBFA88",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1501",
+        "cmake/ApplySkate3CodegenPatches.cmake:1505",
+        "cmake/ApplySkate3CodegenPatches.cmake:1509",
+        "cmake/ApplySkate3CodegenPatches.cmake:1512"
+      ]
+    },
+    {
+      "address": "0x82BC2598",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1122"
+      ]
+    },
+    {
+      "address": "0x82BC2FD8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1106"
+      ]
+    },
+    {
+      "address": "0x82BC4FB8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1114"
+      ]
+    },
+    {
+      "address": "0x82BC52B0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1118"
+      ]
+    },
+    {
+      "address": "0x82BC8DE0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1126"
+      ]
+    },
+    {
+      "address": "0x82BCC030",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_scoring.cpp:21"
+      ]
+    },
+    {
+      "address": "0x82BD8918",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1231"
+      ]
+    },
+    {
+      "address": "0x82BDDD70",
+      "name": "Physics::Skeleton",
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_mechanics_sandbox.cpp:1508"
+      ]
+    },
+    {
+      "address": "0x82BDE060",
+      "name": "Physics::Skeleton",
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_mechanics_sandbox.cpp:1508"
+      ]
+    },
+    {
+      "address": "0x82C02840",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_collision.cpp:744"
+      ]
+    },
+    {
+      "address": "0x82C0B2C8",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 3,
+      "references": [
+        "src/skate3_mechanics_sandbox.cpp:1437",
+        "src/skate3_mechanics_sandbox.cpp:913",
+        "src/skate3_mechanics_sandbox.cpp:945"
+      ]
+    },
+    {
+      "address": "0x82C1ED60",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 5,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:287",
+        "cmake/ApplySkate3CodegenPatches.cmake:289",
+        "cmake/ApplySkate3CodegenPatches.cmake:292",
+        "src/skate3_native_grind.cpp:118",
+        "src/skate3_native_grind.cpp:75"
+      ]
+    },
+    {
+      "address": "0x82C1EE28",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_grind.cpp:209"
+      ]
+    },
+    {
+      "address": "0x82C1EEF0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 4,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:260",
+        "cmake/ApplySkate3CodegenPatches.cmake:262",
+        "cmake/ApplySkate3CodegenPatches.cmake:265",
+        "src/skate3_native_grind.cpp:160"
+      ]
+    },
+    {
+      "address": "0x82C36300",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_owned_world_boundary.cpp:380"
+      ]
+    },
+    {
+      "address": "0x82C4D440",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_owned_world_boundary.cpp:390"
+      ]
+    },
+    {
+      "address": "0x82C9A618",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_native_render.cpp:445"
+      ]
+    },
+    {
+      "address": "0x82D085C0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:2082"
+      ]
+    },
+    {
+      "address": "0x82D0A628",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_demo_path.cpp:270"
+      ]
+    },
+    {
+      "address": "0x82D0AFA0",
+      "name": "FEMoviePlayer::Update",
+      "relationship": "hooked",
+      "reference_count": 5,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1846",
+        "cmake/ApplySkate3CodegenPatches.cmake:1850",
+        "cmake/ApplySkate3CodegenPatches.cmake:1854",
+        "cmake/ApplySkate3CodegenPatches.cmake:1857",
+        "src/skate3_demo_path.cpp:212"
+      ]
+    },
+    {
+      "address": "0x82D19518",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1199"
+      ]
+    },
+    {
+      "address": "0x82D19728",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1203"
+      ]
+    },
+    {
+      "address": "0x82D19A40",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1211"
+      ]
+    },
+    {
+      "address": "0x82D19BD0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 3,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1207",
+        "cmake/ApplySkate3CodegenPatches.cmake:1243",
+        "src/skate3_trick_pipeline.cpp:4646"
+      ]
+    },
+    {
+      "address": "0x82D1B340",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1300",
+        "cmake/ApplySkate3CodegenPatches.cmake:1304"
+      ]
+    },
+    {
+      "address": "0x82D1B488",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1315",
+        "cmake/ApplySkate3CodegenPatches.cmake:1318"
+      ]
+    },
+    {
+      "address": "0x82D1C200",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 4,
+      "references": [
+        "src/skate3_trick_pipeline.cpp:1578",
+        "src/skate3_trick_pipeline.cpp:4444",
+        "src/skate3_trick_pipeline.cpp:4661",
+        "src/skate3_trick_pipeline.cpp:4678"
+      ]
+    },
+    {
+      "address": "0x82D1DE08",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1227"
+      ]
+    },
+    {
+      "address": "0x82D21E28",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1219"
+      ]
+    },
+    {
+      "address": "0x82D26010",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1223"
+      ]
+    },
+    {
+      "address": "0x82D54C90",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_mechanics_sandbox.cpp:1056"
+      ]
+    },
+    {
+      "address": "0x82D55AE8",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_mechanics_sandbox.cpp:1086"
+      ]
+    },
+    {
+      "address": "0x82D5CA98",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 3,
+      "references": [
+        "src/skate3_mechanics_sandbox.cpp:1049",
+        "src/skate3_mechanics_sandbox.cpp:1053",
+        "src/skate3_mechanics_sandbox.cpp:1210"
+      ]
+    },
+    {
+      "address": "0x82D74DD8",
+      "name": "Lifecycle::kHotReload",
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_mechanics_sandbox.cpp:91"
+      ]
+    },
+    {
+      "address": "0x82D76D20",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 3,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1884",
+        "cmake/ApplySkate3CodegenPatches.cmake:1888",
+        "cmake/ApplySkate3CodegenPatches.cmake:1891"
+      ]
+    },
+    {
+      "address": "0x82D886B8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1102"
+      ]
+    },
+    {
+      "address": "0x82DA22A8",
+      "name": "ScorableLayout::kDefinitionWord0",
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:976",
+        "src/skate3_custom_trick.cpp:671"
+      ]
+    },
+    {
+      "address": "0x82DA2340",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 2,
+      "references": [
+        "src/skate3_trick_types.h:178",
+        "src/skate3_trick_types.h:194"
+      ]
+    },
+    {
+      "address": "0x82DA25B8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:972"
+      ]
+    },
+    {
+      "address": "0x82DA33E0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:886",
+        "cmake/ApplySkate3CodegenPatches.cmake:922"
+      ]
+    },
+    {
+      "address": "0x82DA4010",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:952"
+      ]
+    },
+    {
+      "address": "0x82DA45C8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:968",
+        "src/skate3_trick_pipeline.h:210"
+      ]
+    },
+    {
+      "address": "0x82DA4E98",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:980",
+        "src/skate3_custom_trick.cpp:1635"
+      ]
+    },
+    {
+      "address": "0x82DA5D18",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1062"
+      ]
+    },
+    {
+      "address": "0x82DA5F98",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1070"
+      ]
+    },
+    {
+      "address": "0x82DA60F0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1074"
+      ]
+    },
+    {
+      "address": "0x82DA6260",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1078",
+        "cmake/ApplySkate3CodegenPatches.cmake:1082"
+      ]
+    },
+    {
+      "address": "0x82DA6468",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1086"
+      ]
+    },
+    {
+      "address": "0x82DA6538",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1090"
+      ]
+    },
+    {
+      "address": "0x82DA8A70",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:956"
+      ]
+    },
+    {
+      "address": "0x82DA9218",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:960"
+      ]
+    },
+    {
+      "address": "0x82DA92B8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 6,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1022",
+        "cmake/ApplySkate3CodegenPatches.cmake:1027",
+        "cmake/ApplySkate3CodegenPatches.cmake:1039",
+        "cmake/ApplySkate3CodegenPatches.cmake:1044",
+        "cmake/ApplySkate3CodegenPatches.cmake:964",
+        "cmake/ApplySkate3CodegenPatches.cmake:996"
+      ]
+    },
+    {
+      "address": "0x82DA93D8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1066",
+        "cmake/ApplySkate3CodegenPatches.cmake:984"
+      ]
+    },
+    {
+      "address": "0x82DA9B08",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1094"
+      ]
+    },
+    {
+      "address": "0x82DAC498",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 3,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:892",
+        "cmake/ApplySkate3CodegenPatches.cmake:898",
+        "cmake/ApplySkate3CodegenPatches.cmake:904"
+      ]
+    },
+    {
+      "address": "0x82DAC620",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_custom_trick.cpp:1647"
+      ]
+    },
+    {
+      "address": "0x82DAC698",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1002",
+        "cmake/ApplySkate3CodegenPatches.cmake:1006"
+      ]
+    },
+    {
+      "address": "0x82DB9100",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1098"
+      ]
+    },
+    {
+      "address": "0x82DCAF50",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 2,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1702",
+        "src/skate3_input_lab.cpp:1246"
+      ]
+    },
+    {
+      "address": "0x82DEFB98",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1166"
+      ]
+    },
+    {
+      "address": "0x82DEFCC0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1170"
+      ]
+    },
+    {
+      "address": "0x82DF51F8",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1158"
+      ]
+    },
+    {
+      "address": "0x82DF52B0",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1162"
+      ]
+    },
+    {
+      "address": "0x82DFC118",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1150"
+      ]
+    },
+    {
+      "address": "0x82DFC258",
+      "name": null,
+      "relationship": "hooked",
+      "reference_count": 1,
+      "references": [
+        "cmake/ApplySkate3CodegenPatches.cmake:1154"
+      ]
+    },
+    {
+      "address": "0x82EBAE34",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_app_common.cpp:965"
+      ]
+    },
+    {
+      "address": "0x82EBAE4C",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_app_common.cpp:965"
+      ]
+    },
+    {
+      "address": "0x82F44E40",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/exception_compat.cpp:20"
+      ]
+    },
+    {
+      "address": "0x82F6FAA0",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/exception_compat.cpp:16"
+      ]
+    },
+    {
+      "address": "0x82F8A380",
+      "name": null,
+      "relationship": "called",
+      "reference_count": 1,
+      "references": [
+        "src/skate3_scoring.cpp:21"
+      ]
+    }
+  ]
+}

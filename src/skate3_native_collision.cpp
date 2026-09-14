@@ -1569,13 +1569,14 @@ bool SelectOwnedCollisionMeshes(float x, float z, bool force) {
 }
 
 std::vector<bool> EditableCollisionObjects(
-    const skate::world::MapDefinition& definition) {
+    const skate::world::MapDefinition& definition,
+    std::size_t first_index = 0) {
   const std::size_t object_count =
       std::min<std::size_t>(
           definition.editable_objects.size(),
           kMaximumEditableObjects);
   std::vector<bool> desired(object_count, false);
-  for (std::size_t index = 0; index < object_count; ++index) {
+  for (std::size_t index = first_index; index < object_count; ++index) {
     const skate::world::MapObject& object =
         definition.editable_objects[index];
     desired[index] = !object.collision_triangles.empty();
@@ -5016,7 +5017,29 @@ void UpdateEditableObjects(PPCContext& ctx,
   map_editor::ApplyPendingSpawn();
   const skate::world::MapDefinition& definition =
       mechanics_sandbox::map::ActiveDefinition();
-  if (!Enabled() || base == nullptr ||
+
+  // Props spawned at runtime onto the RETAIL map.
+  //
+  // Vanilla Mode leaves retail's collision authoritative and never compiles
+  // owned static collision, so all three preconditions below read as "not
+  // ready" - but for a prop the premise is inverted: retail's static world
+  // is ALREADY installed, which is exactly the condition wanted, and the
+  // collection being registered into is retail's own (harvested from
+  // WorldStreamerView). So this path is opened for runtime spawns only.
+  //
+  // Deliberately self-limiting: it does nothing at all until something has
+  // actually been spawned, so ordinary retail play is untouched, and it
+  // never registers the map package's own editable objects - those belong
+  // to the owned base map, which is not the world being played.
+  const std::size_t runtime_first =
+      mechanics_sandbox::map::RuntimeSpawnedObjectFirstIndex();
+  const bool prop_overlay =
+      !Enabled() &&
+      runtime_first != std::numeric_limits<std::size_t>::max() &&
+      runtime_first < definition.editable_objects.size();
+  const std::size_t collision_first_index = prop_overlay ? runtime_first : 0;
+
+  if ((!Enabled() && !prop_overlay) || base == nullptr ||
       definition.editable_objects.empty()) {
     g_editor_collision_count.store(0, std::memory_order_release);
     g_editor_collision_dynamic_count.store(0, std::memory_order_release);
@@ -5031,7 +5054,10 @@ void UpdateEditableObjects(PPCContext& ctx,
       static_state == State::InstalledAdditive ||
       static_state == State::InstalledExclusive ||
       static_state == State::ReplacementFailed;
-  if (!static_world_ready) {
+  // The owned static world is the precondition for the map-editor case. A
+  // prop on the retail map has retail's own static world instead, which is
+  // already installed by definition.
+  if (!static_world_ready && !prop_overlay) {
     return;
   }
   if (definition.editable_objects.size() >
@@ -5053,11 +5079,21 @@ void UpdateEditableObjects(PPCContext& ctx,
   const std::uint32_t collection =
       g_collection.load(std::memory_order_acquire);
   float map_origin[3] = {};
-  if (!IsGuestDataAddress(collection) ||
-      !MapWorldOrigin(map_origin)) {
+  if (!IsGuestDataAddress(collection)) {
     return;
   }
-  UpdateBox3DPlayerProxy(map_origin);
+  if (!MapWorldOrigin(map_origin)) {
+    // No owned map placement in Vanilla Mode. Retail world coordinates need
+    // no offset - the same {0,0,0} convention the renderer uses for these
+    // props - so an absent origin is only fatal for the owned-map case.
+    if (!prop_overlay) {
+      return;
+    }
+    std::fill_n(map_origin, 3, 0.0f);
+  }
+  if (!prop_overlay) {
+    UpdateBox3DPlayerProxy(map_origin);
+  }
 
   if (UpdateExactRetailEditableObjects(ctx, base, collection, definition,
                                        map_origin)) {
@@ -5086,7 +5122,7 @@ void UpdateEditableObjects(PPCContext& ctx,
           object.collision_triangles.empty() ? 0u : 1u;
     }
     const std::vector<bool> desired =
-        EditableCollisionObjects(definition);
+        EditableCollisionObjects(definition, collision_first_index);
     const std::uint32_t desired_collision_count =
         static_cast<std::uint32_t>(std::count(
             desired.begin(), desired.end(), true));
@@ -5128,6 +5164,9 @@ void UpdateEditableObjects(PPCContext& ctx,
 
     for (std::size_t index = installed_object_count;
          index < object_count; ++index) {
+      if (index < collision_first_index) {
+        continue;  // map-package object; not part of the retail overlay
+      }
       const skate::world::MapObject& object =
           definition.editable_objects[index];
       const bool dynamic =

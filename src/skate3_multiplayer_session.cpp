@@ -1,5 +1,4 @@
 #include "skate3_multiplayer_session.h"
-#include "skate3_steam_backend.h"
 
 #include <algorithm>
 #include <charconv>
@@ -27,8 +26,11 @@ namespace {
 constexpr std::uint32_t kRegistryVersion = 1;
 constexpr std::int32_t kDefaultBasePort = 27051;
 constexpr std::int32_t kPortsPerSession = 100;
-constexpr std::string_view kSteamUnavailableMessage =
-    "Start Steam to use multiplayer.";
+// Steam P2P has been removed (see skate3_steam_backend.cpp); this is what
+// shows when neither the dedicated-relay nor local-test path is active.
+constexpr std::string_view kNotConnectedMessage =
+    "Not connected. Use Direct Connect for a dedicated server, or enable "
+    "local testing to Host/Join on this PC.";
 
 struct RegistrySession {
   std::string id;
@@ -56,6 +58,10 @@ RuntimeState g_state;
 
 bool LocalTestModeEnabled() {
   return rex::cvar::Query<bool>("skate3_multiplayer_local_visuals");
+}
+
+bool RelayModeEnabled() {
+  return rex::cvar::Query<bool>("skate3_multiplayer_relay_active");
 }
 
 std::uint32_t CurrentPid() {
@@ -347,6 +353,20 @@ void SetLocalTransport(bool enabled, std::uint32_t role,
       "skate3_multiplayer_local_visuals", enabled ? "true" : "false");
 }
 
+void SetRelayTransport(bool active, const std::string& address,
+                       const std::string& token) {
+  rex::cvar::SetFlagByName(
+      "skate3_multiplayer_relay_active", active ? "true" : "false");
+  rex::cvar::SetFlagByName("skate3_multiplayer_relay_address", address);
+  rex::cvar::SetFlagByName("skate3_multiplayer_relay_token", token);
+  if (!active) {
+    // Runtime only assigns skate3_multiplayer_local_client once the relay
+    // acknowledges registration; clear it so a later same-PC Host/Join does
+    // not inherit a stale relay-assigned role.
+    rex::cvar::SetFlagByName("skate3_multiplayer_local_client", "0");
+  }
+}
+
 void RemoveOwnedFiles() {
   std::error_code ec;
   if (!g_state.owned_registry_file.empty()) {
@@ -363,6 +383,7 @@ void RemoveOwnedFiles() {
 void ResetActiveState() {
   RemoveOwnedFiles();
   SetLocalTransport(false, 0, kDefaultBasePort);
+  SetRelayTransport(false, "", "");
   g_state.active.reset();
   g_state.local_role = 0;
   g_state.snapshot.phase = SessionPhase::kOffline;
@@ -406,102 +427,47 @@ void PopulateBrowser(const std::string& active_map) {
   }
 }
 
-void PopulateSteamBrowser(const steam::State& state,
-                          const std::string& active_map) {
-  g_state.snapshot.servers.clear();
-  for (const steam::Lobby& lobby : state.lobbies) {
-    ServerListing listing;
-    listing.id = std::to_string(lobby.id);
-    listing.name =
-        lobby.name.empty() ? "Steam Lobby " + listing.id : lobby.name;
-    listing.host_name = lobby.host_name;
-    listing.map_name = lobby.map_name;
-    listing.players = lobby.players;
-    listing.max_players = lobby.max_players;
-    listing.privacy = static_cast<SessionPrivacy>(
-        std::min(lobby.privacy, 2u));
-    listing.passworded = lobby.passworded;
-    listing.compatible =
-        lobby.allow_late_join &&
-        listing.players < listing.max_players &&
-        (active_map.empty() || lobby.map_name.empty() ||
-         lobby.map_name == active_map);
-    if (!lobby.allow_late_join) {
-      listing.compatibility_note = "Late joining is disabled.";
-    } else if (listing.players >= listing.max_players) {
-      listing.compatibility_note = "Server is full.";
-    } else if (!active_map.empty() && !lobby.map_name.empty() &&
-               lobby.map_name != active_map) {
-      listing.compatibility_note =
-          "Load map '" + lobby.map_name + "' before joining.";
-    }
-    g_state.snapshot.servers.push_back(std::move(listing));
-  }
-}
-
-std::optional<std::uint64_t> ParseSteamLobbyId(
-    std::string_view text) {
-  std::uint64_t value = 0;
-  const auto result =
-      std::from_chars(text.data(), text.data() + text.size(), value);
-  if (result.ec != std::errc{} ||
-      result.ptr != text.data() + text.size() || value == 0) {
-    return std::nullopt;
-  }
-  return value;
-}
+// PopulateSteamBrowser/ParseSteamLobbyId were removed with Steam P2P - the
+// local-test registry browser (PopulateBrowser, above) is the only
+// server-listing source left.
 
 SessionSnapshot SnapshotLocked(const std::string& active_map,
                                bool refresh) {
-  const steam::State steam_state = steam::GetState();
-  const bool local_test_mode = LocalTestModeEnabled();
-  g_state.snapshot.steam_available = steam_state.initialized;
-  g_state.snapshot.backend_name =
-      steam_state.initialized ? "Steam P2P (Spacewar / App 480)"
-      : local_test_mode       ? "Local PC Test"
-                              : "Steam unavailable";
-  g_state.snapshot.steam_status = steam_state.status;
-  if (steam_state.initialized) {
-    if (refresh) {
-      steam::RefreshLobbies();
-    }
-    PopulateSteamBrowser(steam_state, active_map);
-    if (steam_state.in_lobby) {
-      g_state.snapshot.phase =
-          steam_state.is_host ? SessionPhase::kHosting
-                              : SessionPhase::kConnected;
-      g_state.snapshot.is_host = steam_state.is_host;
-      g_state.snapshot.status = steam_state.status;
-      g_state.snapshot.session_id =
-          std::to_string(steam_state.lobby_id);
-      g_state.snapshot.session_name = steam_state.lobby_name;
-      g_state.snapshot.host_name = steam_state.lobby_host_name;
-      g_state.snapshot.map_name = steam_state.lobby_map_name;
-      g_state.snapshot.players = steam_state.lobby_players;
-      g_state.snapshot.max_players = steam_state.lobby_max_players;
-    } else if (!g_state.active) {
-      g_state.snapshot.phase =
-          steam_state.status.find("failed") != std::string::npos
-              ? SessionPhase::kError
-              : SessionPhase::kOffline;
-      g_state.snapshot.is_host = false;
-      g_state.snapshot.status = steam_state.status;
-      g_state.snapshot.session_id.clear();
-      g_state.snapshot.session_name.clear();
-      g_state.snapshot.host_name.clear();
-      g_state.snapshot.map_name.clear();
+  // Steam P2P is gone (skate3_steam_backend.cpp is now a stub); the two
+  // live paths are the dedicated relay and same-PC local testing.
+  if (RelayModeEnabled()) {
+    g_state.snapshot.steam_available = false;
+    g_state.snapshot.backend_name = "Dedicated Server";
+    g_state.snapshot.steam_status.clear();
+    g_state.snapshot.servers.clear();
+    const std::int32_t role =
+        rex::cvar::Query<std::int32_t>("skate3_multiplayer_local_client");
+    g_state.snapshot.phase = SessionPhase::kConnected;
+    g_state.snapshot.is_host = false;
+    if (role > 0) {
+      g_state.snapshot.status =
+          "Connected via " +
+          rex::cvar::Query<std::string>("skate3_multiplayer_relay_address") +
+          " as player " + std::to_string(role) + ".";
+      g_state.snapshot.players = 1;
+    } else {
+      g_state.snapshot.status =
+          "Connecting to " +
+          rex::cvar::Query<std::string>("skate3_multiplayer_relay_address") +
+          "...";
       g_state.snapshot.players = 0;
-      g_state.snapshot.max_players = 0;
     }
     return g_state.snapshot;
   }
+  const bool local_test_mode = LocalTestModeEnabled();
+  g_state.snapshot.steam_available = false;
+  g_state.snapshot.backend_name =
+      local_test_mode ? "Local PC Test" : "Not connected";
+  g_state.snapshot.steam_status.clear();
   if (!local_test_mode) {
     g_state.snapshot.phase = SessionPhase::kOffline;
     g_state.snapshot.is_host = false;
-    g_state.snapshot.status =
-        steam_state.status.empty()
-            ? std::string(kSteamUnavailableMessage)
-            : steam_state.status;
+    g_state.snapshot.status = std::string(kNotConnectedMessage);
     g_state.snapshot.session_id.clear();
     g_state.snapshot.session_name.clear();
     g_state.snapshot.host_name.clear();
@@ -523,45 +489,20 @@ SessionSnapshot SnapshotLocked(const std::string& active_map,
 }  // namespace
 
 SessionSnapshot GetSessionSnapshot(const std::string& active_map) {
-  steam::Tick();
   std::scoped_lock lock(g_mutex);
   return SnapshotLocked(active_map, false);
 }
 
 SessionSnapshot RefreshServerBrowser(const std::string& active_map) {
-  steam::Tick();
-  if (!steam::IsInitialized()) {
-    steam::RequestAvailabilityCheck();
-  }
   std::scoped_lock lock(g_mutex);
   return SnapshotLocked(active_map, true);
 }
 
 bool HostSession(const HostSettings& settings) {
-  steam::Tick();
   std::scoped_lock lock(g_mutex);
-  const steam::State steam_state = steam::GetState();
-  if (steam_state.initialized) {
-    steam::LeaveLobby();
-    ResetActiveState();
-    const bool started = steam::HostLobby(
-        CleanField(settings.server_name.empty()
-                       ? settings.host_name + "'s Game"
-                       : settings.server_name,
-                   63),
-        CleanField(settings.host_name, 31),
-        CleanField(settings.map_name, 127),
-        std::clamp(settings.max_players, 2u, 100u),
-        static_cast<std::uint32_t>(settings.privacy),
-        settings.allow_late_join, HashPassword(settings.password));
-    g_state.snapshot.status =
-        started ? "Creating Steam lobby..."
-                : steam::GetState().status;
-    return started;
-  }
   if (!LocalTestModeEnabled()) {
     g_state.snapshot.phase = SessionPhase::kOffline;
-    g_state.snapshot.status = std::string(kSteamUnavailableMessage);
+    g_state.snapshot.status = std::string(kNotConnectedMessage);
     return false;
   }
   ResetActiveState();
@@ -621,28 +562,10 @@ bool HostSession(const HostSettings& settings) {
 
 bool JoinSession(const std::string& server_id, const std::string& password,
                  const std::string& active_map) {
-  steam::Tick();
   std::scoped_lock lock(g_mutex);
-  const steam::State steam_state = steam::GetState();
-  if (steam_state.initialized) {
-    const auto lobby_id = ParseSteamLobbyId(server_id);
-    if (!lobby_id) {
-      g_state.snapshot.phase = SessionPhase::kError;
-      g_state.snapshot.status = "That Steam lobby ID is invalid.";
-      return false;
-    }
-    steam::LeaveLobby();
-    ResetActiveState();
-    const bool started =
-        steam::JoinLobby(*lobby_id, HashPassword(password));
-    g_state.snapshot.status =
-        started ? "Joining Steam lobby..."
-                : steam::GetState().status;
-    return started;
-  }
   if (!LocalTestModeEnabled()) {
     g_state.snapshot.phase = SessionPhase::kOffline;
-    g_state.snapshot.status = std::string(kSteamUnavailableMessage);
+    g_state.snapshot.status = std::string(kNotConnectedMessage);
     return false;
   }
   ResetActiveState();
@@ -721,10 +644,47 @@ bool JoinSession(const std::string& server_id, const std::string& password,
   return true;
 }
 
-void LeaveSession() {
-  steam::Tick();
+bool ConnectDedicated(const std::string& address, const std::string& token,
+                      const std::string& active_map) {
   std::scoped_lock lock(g_mutex);
-  steam::LeaveLobby();
+  const auto separator = address.rfind(':');
+  std::uint32_t port = 0;
+  const bool syntax_valid =
+      separator != std::string::npos && separator > 0 &&
+      separator + 1 < address.size() &&
+      [&] {
+        const std::string port_text = address.substr(separator + 1);
+        const auto parsed = std::from_chars(
+            port_text.data(), port_text.data() + port_text.size(), port);
+        return parsed.ec == std::errc{} &&
+               parsed.ptr == port_text.data() + port_text.size() &&
+               port >= 1 && port <= 65535;
+      }();
+  if (!syntax_valid) {
+    g_state.snapshot.phase = SessionPhase::kError;
+    g_state.snapshot.status = "Enter the relay address as host:port.";
+    return false;
+  }
+  ResetActiveState();
+  SetRelayTransport(true, address, token);
+  g_state.local_role = 0;
+  g_state.snapshot.phase = SessionPhase::kConnected;
+  g_state.snapshot.is_host = false;
+  g_state.snapshot.backend_name = "Dedicated Server";
+  g_state.snapshot.status = "Connecting to " + address + "...";
+  g_state.snapshot.session_id.clear();
+  g_state.snapshot.session_name = address;
+  g_state.snapshot.host_name.clear();
+  g_state.snapshot.map_name = active_map;
+  g_state.snapshot.players = 0;
+  g_state.snapshot.max_players = 0;
+  REXLOG_INFO("multiplayer-session: connecting to dedicated relay {}",
+             address);
+  return true;
+}
+
+void LeaveSession() {
+  std::scoped_lock lock(g_mutex);
   if (g_state.active) {
     REXLOG_INFO(
         "multiplayer-session: leaving '{}' (role={})",
@@ -733,9 +693,6 @@ void LeaveSession() {
   ResetActiveState();
 }
 
-void ShutdownSessions() {
-  LeaveSession();
-  steam::Shutdown();
-}
+void ShutdownSessions() { LeaveSession(); }
 
 }  // namespace skate3::multiplayer

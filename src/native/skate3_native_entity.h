@@ -31,6 +31,7 @@
 // once the live telemetry proves each field (ident[] stats line).
 
 #include <cstdint>
+#include <vector>
 
 namespace skate3::native_entity {
 
@@ -77,6 +78,30 @@ struct CtxInfo {
   bool view_live = false;  // Add/Rmv refcount > 0
 };
 bool LookupCtx(uint32_t ctx, CtxInfo* out);
+
+// Every distinct cModelInstance address seen bound to this entity (body,
+// board, garments, ...), each owning its own bone/rigid-part world palette
+// (m_matrices at instance+0x14/+0x18 - the same fields ServeInstancePalette
+// reads). Empty if the entity is unknown. For a caller that needs to
+// rigidly translate the WHOLE visible character (every part, not just one
+// mesh's world matrix).
+std::vector<uint32_t> EntityInstances(uint32_t entity);
+
+// Snapshot of every currently-live (view_refs > 0) skater-family entity
+// (kSkater/kColorized/kCac/kSkaterAux). For callers that need to correlate
+// a known-good world position against every currently-rendered character -
+// e.g. mechanics_sandbox's local-player identity search, which has no
+// other way to pick the one SkaterPresEntity that corresponds to the
+// verified local SkateboardController out of however many skaters/NPCs
+// are on screen.
+std::vector<uint32_t> LiveSkaterFamilyEntities();
+
+// A skater-family entity's world position (m_MatLtoWTrans translation,
+// entity+416 components 3/7/11 - see kEntL2WTrans), with the same
+// structural sanity checks ReadEntityWorldRows applies (homogeneous tail
+// row, plausible row norms). False if unreadable or implausible.
+bool ReadSkaterEntityWorldPosition(uint8_t* base, uint32_t entity,
+                                   float out_xyz[3]);
 
 // Observer probes (render thread, called from the scene builder).
 //

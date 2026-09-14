@@ -1,0 +1,794 @@
+{
+  "$schema_notes": "Lua scripting API exposed by sk8-engine - the FiveM-shaped surface resources are written against. Distinct from natives_export.json in this folder, which catalogues retail reverse-engineering findings; nothing here is a retail native.",
+  "generated_at": "2026-09-13",
+  "generated_by": "hand-written from the registration sites in src/skate3_lua_client_natives.cpp, src/skate3_lua_script_host.cpp and tools/relay/skate3_dedicated_main.cpp",
+  "engine_conventions": [
+    "Y is the VERTICAL axis; the horizontal plane is X/Z.",
+    "A native that cannot answer yet returns false/0/empty rather than erroring, and that state means 'not in gameplay' - not a real answer. Game modes must not collapse the two."
+  ],
+  "counts": {
+    "total": 97,
+    "client": 75,
+    "server": 8,
+    "shared": 14
+  },
+  "natives": [
+    {
+      "name": "RegisterCommand",
+      "side": "shared",
+      "signature": "RegisterCommand(name, function(source, args, raw))",
+      "summary": "Registers a console command. Runs when the name is typed in the F7 console or POSTed to /api/console/exec.",
+      "category": "Core"
+    },
+    {
+      "name": "print",
+      "side": "shared",
+      "signature": "print(...)",
+      "summary": "Overridden per resource: joins its arguments and writes them to the shared console log, so output reaches the F7 console and /api/console/log rather than a stdout nothing shows.",
+      "category": "Core"
+    },
+    {
+      "name": "GetResourceMetrics",
+      "side": "shared",
+      "signature": "GetResourceMetrics() -> table",
+      "summary": "Every resource's CPU cost and memory, keyed by resource name: {msLastSecond, callsLastSecond, msLifetime, callsLifetime, memoryKb}. msLastSecond/callsLastSecond are the previous full second's total, not a live partial number. memoryKb is that resource's own lua_State via lua_gc(LUA_GCCOUNT) - no attribution problem, since every resource owns an independent state. The same data backs the 'resmon' console command and the /api/metrics HTTP route.",
+      "category": "Core"
+    },
+    {
+      "name": "GetCurrentResourceName",
+      "side": "client",
+      "signature": "GetCurrentResourceName() -> string",
+      "summary": "The resource whose script is calling. Resource-aware native: it reads the resource name the VM was created with.",
+      "category": "Core"
+    },
+    {
+      "name": "AddEventHandler",
+      "side": "shared",
+      "signature": "AddEventHandler(event, handler)",
+      "summary": "Runs handler whenever the event fires in this resource. Local events need no declaration.",
+      "category": "Events"
+    },
+    {
+      "name": "RegisterNetEvent",
+      "side": "shared",
+      "signature": "RegisterNetEvent(event[, handler])",
+      "summary": "Declares that this resource accepts the event FROM THE NETWORK. Without it a peer cannot invoke the event here - this is the gate that stops a client calling arbitrary internal events.",
+      "category": "Events"
+    },
+    {
+      "name": "TriggerEvent",
+      "side": "shared",
+      "signature": "TriggerEvent(event, ...)",
+      "summary": "Fires an event locally, in every started resource that handles it. No network involved.",
+      "category": "Events"
+    },
+    {
+      "name": "TriggerServerEvent",
+      "side": "client",
+      "signature": "TriggerServerEvent(event, ...)",
+      "summary": "Sends an event to the server. Arguments are JSON-marshalled. Delivery is reliable and ordered.",
+      "category": "Events",
+      "notes": "Rides the game protocol's reliable channel (kReliableStream), not HTTP."
+    },
+    {
+      "name": "TriggerClientEvent",
+      "side": "server",
+      "signature": "TriggerClientEvent(event, target, ...)",
+      "summary": "Sends an event to one client, or to every client when target is -1. The handler sees the sender's id in the global `source`.",
+      "category": "Events"
+    },
+    {
+      "name": "source",
+      "side": "server",
+      "signature": "source",
+      "summary": "Not a function: a global set for the duration of a network event handler, holding the sender's player id. Taken from the relay's own connection table, not from anything the client declared, so it cannot be spoofed.",
+      "category": "Events"
+    },
+    {
+      "name": "exports",
+      "side": "shared",
+      "signature": "exports('name', fn) / exports.resource:name(...)",
+      "summary": "Registers a function other resources can call, and the table used to call theirs.",
+      "category": "Exports"
+    },
+    {
+      "name": "GlobalState",
+      "side": "shared",
+      "signature": "GlobalState.key = value / GlobalState.key",
+      "summary": "Server-authoritative shared state. Writes on the server replicate to every client; reads work on both sides. Tables are supported.",
+      "category": "State bags"
+    },
+    {
+      "name": "Player",
+      "side": "shared",
+      "signature": "Player(id).state.key",
+      "summary": "Per-player state bag, same replication rules as GlobalState.",
+      "category": "State bags"
+    },
+    {
+      "name": "AddStateBagChangeHandler",
+      "side": "shared",
+      "signature": "AddStateBagChangeHandler(keyFilter, bagFilter, handler)",
+      "summary": "Runs handler on any matching bag change. nil filters match everything.",
+      "category": "State bags"
+    },
+    {
+      "name": "Skate.CreateThread",
+      "side": "shared",
+      "signature": "Skate.CreateThread(fn) -> coroutine",
+      "summary": "Runs fn as a coroutine. The body starts IMMEDIATELY and runs until its first Skate.Wait, so a thread that never waits never yields control.",
+      "category": "Threads"
+    },
+    {
+      "name": "Skate.Wait",
+      "side": "shared",
+      "signature": "Skate.Wait(ms)",
+      "summary": "Yields the calling thread for at least ms; 0 means the next tick. Errors if called outside a thread.",
+      "category": "Threads",
+      "notes": "Resolution is one tick - measured at roughly 2.6ms on the client and 15ms on the server - so a wait never returns early but can overshoot by a tick."
+    },
+    {
+      "name": "Skate.TimeOut",
+      "side": "shared",
+      "signature": "Skate.TimeOut(ms, fn)",
+      "summary": "Runs fn once, ms from now.",
+      "category": "Threads"
+    },
+    {
+      "name": "Skate.GetGameTimer",
+      "side": "shared",
+      "signature": "Skate.GetGameTimer() -> ms",
+      "summary": "Monotonic milliseconds since the host started. Deliberately not the wall clock: a clock correction would otherwise fire every pending Wait at once.",
+      "category": "Threads"
+    },
+    {
+      "name": "SendNUIMessage",
+      "side": "client",
+      "signature": "SendNUIMessage(table)",
+      "summary": "Delivers a message to this resource's own NUI frame. The page receives it through window.addEventListener('message', ...).",
+      "category": "NUI"
+    },
+    {
+      "name": "RegisterNUICallback",
+      "side": "client",
+      "signature": "RegisterNUICallback(name, function(data, cb))",
+      "summary": "Handles a POST from this resource's page to https://<resource>/<name>. `cb` may be called immediately or kept and called later.",
+      "category": "NUI",
+      "notes": "An unanswered cb is answered with {} after 15s so the page's fetch cannot hang forever."
+    },
+    {
+      "name": "SetNuiFocus",
+      "side": "client",
+      "signature": "SetNuiFocus(hasFocus[, hasCursor])",
+      "summary": "Routes input into this resource's page. hasCursor defaults to hasFocus.",
+      "category": "NUI",
+      "notes": "Also decides WHICH page receives pointer input: every resource with a ui_page has a full-screen frame, and only the focused one is clickable. Without that the topmost frame silently swallows every click meant for the page underneath."
+    },
+    {
+      "name": "SetNuiFocusKeepInput",
+      "side": "client",
+      "signature": "SetNuiFocusKeepInput(keep)",
+      "summary": "Keeps gameplay input live while NUI holds focus - the HUD case. The pad stops driving the page while this is set, since the same sticks are steering the skater.",
+      "category": "NUI"
+    },
+    {
+      "name": "GetNuiFocus",
+      "side": "client",
+      "signature": "GetNuiFocus() -> hasFocus, hasCursor, keepInput",
+      "summary": "Reads back the current focus state. Not a FiveM native; added because the three-way state is otherwise unreadable from script.",
+      "category": "NUI"
+    },
+    {
+      "name": "GetPlayerId",
+      "side": "client",
+      "signature": "GetPlayerId() -> id",
+      "summary": "This client's player id - the role the relay assigned at connect. 0 when offline.",
+      "category": "Player"
+    },
+    {
+      "name": "GetPlayerName",
+      "side": "client",
+      "signature": "GetPlayerName([id]) -> string",
+      "summary": "A player's display name. id 0 or this client's own id returns the local name; other ids are peers learned from the server's roster broadcast. Empty if unknown.",
+      "category": "Player"
+    },
+    {
+      "name": "IsPlayerSpawned",
+      "side": "client",
+      "signature": "IsPlayerSpawned() -> bool",
+      "summary": "True once the local skater exists in the world with a real position.",
+      "category": "Player",
+      "notes": "Teleporting before this is true does not fail visibly: the request is accepted and posted, then the spawn sequence runs and puts the player back. Anything that moves a player on join must wait for this. It means 'has a board position', which becomes true slightly before the spawn fully settles."
+    },
+    {
+      "name": "GetEntityCoords",
+      "side": "client",
+      "signature": "GetEntityCoords(0) -> x, y, z  |  GetEntityCoords(role) -> x, y, z",
+      "summary": "Entity 0 is the local player's board position. Any other number is looked up as a remote player's role (the same number GetSkaters()/the console's own role= logging use) in the cross-thread published remote-player snapshot, and errors if that role is not currently known. For a remote player this is their replicated board position - the same thing entity 0 means locally, not a separate rider position.",
+      "category": "Player",
+      "notes": "Y is the VERTICAL axis in this engine; the horizontal plane is X/Z."
+    },
+    {
+      "name": "GetPlayerCoords",
+      "side": "client",
+      "signature": "GetPlayerCoords(role) -> x, y, z",
+      "summary": "The same lookup as GetEntityCoords(role), spelled for a script already thinking in player roles rather than a generic entity concept.",
+      "category": "Player"
+    },
+    {
+      "name": "GetActivePlayers",
+      "side": "client",
+      "signature": "GetActivePlayers() -> table of roles",
+      "summary": "Every remote player role this client currently has a published position for. The local player is never included - it has no role the way remote players do; use entity 0.",
+      "category": "Player"
+    },
+    {
+      "name": "GetSyncedProps",
+      "side": "client",
+      "signature": "GetSyncedProps() -> table of { id, path, x, y, z, lod }",
+      "summary": "Every synced prop this client has ever heard about, placed by anyone (propplace, SpawnProp, or another client) - not to be confused with ListProps(filter, limit), which lists prop ASSET FILES available on disk to spawn, not instances that exist in the world. Does not drain anything - calling this does not stop a prop from still being spawned.",
+      "category": "Props"
+    },
+    {
+      "name": "CreateCam",
+      "side": "client",
+      "signature": "CreateCam() -> handle",
+      "summary": "Creates a scripted camera object and returns its handle (0 on failure, never a valid handle otherwise). Not rendering until SetCamActive(handle, true). Replaces the removed player-facing freecam/map-editor keybinds (G/E/End) - this is the only way left to fly the camera, and it is a resource's to drive.",
+      "category": "Camera"
+    },
+    {
+      "name": "DestroyCam",
+      "side": "client",
+      "signature": "DestroyCam(cam)",
+      "summary": "Frees a camera. If it was the active one, the guest camera is handed back the next frame - no separate deactivate step needed first.",
+      "category": "Camera"
+    },
+    {
+      "name": "MoveCam",
+      "side": "client",
+      "signature": "MoveCam(cam, x, y, z) -> boolean",
+      "summary": "Sets where the camera IS. Instant, not animated - a smooth move means calling this again every frame/Skate.Wait with the next point along your own path, the same way FiveM scripts drive SetCamCoord.",
+      "category": "Camera"
+    },
+    {
+      "name": "LookAtCam",
+      "side": "client",
+      "signature": "LookAtCam(cam, x, y, z) -> boolean  |  LookAtCam(cam, entity) -> boolean",
+      "summary": "Points the camera at a world coordinate, or (by argument count) at an entity's position. Only entity 0 (the local player) is supported today, the same limit GetEntityCoords has - this client cannot read another player's position outside of what the relay tells it for rendering.",
+      "category": "Camera"
+    },
+    {
+      "name": "SetCamActive",
+      "side": "client",
+      "signature": "SetCamActive(cam, active) -> boolean",
+      "summary": "active=true makes `cam` the camera the game renders through, replacing whichever was active before - there is only ever one. active=false hands control back to the guest's own camera. Returns false if `cam` does not exist.",
+      "category": "Camera"
+    },
+    {
+      "name": "IsCamActive",
+      "side": "client",
+      "signature": "IsCamActive(cam) -> boolean",
+      "summary": "Whether `cam` is the one currently rendering.",
+      "category": "Camera"
+    },
+    {
+      "name": "GetPlayerSkater",
+      "side": "client",
+      "signature": "GetPlayerSkater() -> table",
+      "summary": "Every verified guest-side handle for the local skater: actor, controller, boardBody, skeleton, physOut, presEntity, x/y/z, frame. A research native, not a stable API.",
+      "category": "Player"
+    },
+    {
+      "name": "SetPlayerCoords",
+      "side": "client",
+      "signature": "SetPlayerCoords(x, y, z)",
+      "summary": "Moves the whole player - rider, board and camera - by posting retail's own cMsgTeleport. This is the teleport to use.",
+      "category": "Teleport",
+      "notes": "Accurate: measured landings matched requested X and Z exactly, with Y settling to the ground below. Destinations far outside the playable area do NOT hold - retail returns the player to the session marker after roughly 5-10 seconds. Held for ~2s if the controller is not ready yet, then logs rather than failing silently."
+    },
+    {
+      "name": "SetEntityPosition",
+      "side": "client",
+      "signature": "SetEntityPosition(0, x, y, z)",
+      "summary": "Moves only the skateboard's physics body. The rider does not come with it, and riding it while this is called fights the physics and resolves at spawn. Kept for comparison; prefer SetPlayerCoords.",
+      "category": "Teleport",
+      "deprecated": true
+    },
+    {
+      "name": "TeleportToSessionMarker",
+      "side": "client",
+      "signature": "TeleportToSessionMarker()",
+      "summary": "Runs retail's own reposition: rider and camera come along, but the destination is whatever the session marker already is, not an arbitrary point.",
+      "category": "Teleport"
+    },
+    {
+      "name": "IsOffBoard",
+      "side": "client",
+      "signature": "IsOffBoard() -> bool",
+      "summary": "True when the skater is not on the board (bailed, walking). Read from retail's own state.",
+      "category": "Player state",
+      "notes": "Provider byte 673 || byte 675."
+    },
+    {
+      "name": "IsAirOffBoard",
+      "side": "client",
+      "signature": "IsAirOffBoard() -> bool",
+      "summary": "Bailed AND airborne, which retail tracks separately because the recovery differs. Provider byte 674.",
+      "category": "Player state"
+    },
+    {
+      "name": "IsSkaterOnGround",
+      "side": "client",
+      "signature": "IsSkaterOnGround() -> bool",
+      "summary": "Retail's own ground predicate.",
+      "category": "Player state"
+    },
+    {
+      "name": "IsSkaterInAir",
+      "side": "client",
+      "signature": "IsSkaterInAir() -> bool",
+      "summary": "The negation of the ground predicate.",
+      "category": "Player state",
+      "notes": "Before the first sample BOTH this and IsSkaterOnGround are false, because that state means 'not in gameplay' rather than 'landed'. They are deliberately not strict inverses."
+    },
+    {
+      "name": "GetPlayerSpeed",
+      "side": "client",
+      "signature": "GetPlayerSpeed() -> number",
+      "summary": "Board speed in world units per second.",
+      "category": "Player state",
+      "notes": "DERIVED by differentiating the sampled board position - nothing has located retail's own velocity. Smoothed, and it rejects implausible deltas so a teleport does not read as a huge speed."
+    },
+    {
+      "name": "GetPlayerVelocity",
+      "side": "client",
+      "signature": "GetPlayerVelocity() -> vx, vy, vz",
+      "summary": "Board velocity. Derived the same way as GetPlayerSpeed. vy is the vertical component.",
+      "category": "Player state"
+    },
+    {
+      "name": "skate3:trickLanded",
+      "side": "client",
+      "signature": "AddEventHandler('skate3:trickLanded', function(trick) end)",
+      "summary": "Fires when the game's own score holder RECORDS a trick. `trick` is {name, id, patternClass, value, frame, nameTrusted}.",
+      "category": "Tricks",
+      "notes": "LOCAL PLAYER ONLY. The score holder is per-skater and the callback fires for every skater in the session, including the AI skaters that populate a free-skate world - they land tricks constantly. The filter compares the holder against the one reached from the PhysOut already proven to be the local player's, so it is retail's own ownership rather than a guess, and nothing is published at all until that ownership resolves. Published from ScoreHolder::RecordTrick rather than from any air-collector hook, because a collector is still assembling a trick and can change its mind - the score holder is where the game decides the trick counted. `id` is retail's EScorableID; `name` is that id looked up in retail's fixed 332-entry metadata table."
+    },
+    {
+      "name": "skate3:trickCancelled",
+      "side": "client",
+      "signature": "AddEventHandler('skate3:trickCancelled', function(trick) end)",
+      "summary": "Fires when the score holder CANCELS a trick instead of recording it - a bail, or a trick that did not complete. Same payload shape.",
+      "category": "Tricks",
+      "notes": "Two events rather than one with a flag: a mode nearly always wants exactly one of them, and re-testing a boolean invites the bug where a script silently handles both."
+    },
+    {
+      "name": "nameTrusted",
+      "side": "client",
+      "signature": "trick.nameTrusted",
+      "summary": "Not a function: the field on a trick payload that says whether the name can be believed. False means the metadata-table entry did not corroborate the lookup, and the trick must be treated as UNKNOWN rather than as the trick the name appears to spell.",
+      "category": "Tricks",
+      "notes": "This exists because a wrong table stride would not fail loudly - it would read out a different, entirely plausible trick name. An adjudicating game mode should refuse to score an untrusted trick rather than score the wrong one. The record is still delivered, because dropping it would make a round hang waiting for a trick that did happen."
+    },
+    {
+      "name": "GetTrickName",
+      "side": "client",
+      "signature": "GetTrickName(id) -> name, trusted",
+      "summary": "Looks an EScorableID up in retail's own trick-metadata table.",
+      "category": "Tricks",
+      "notes": "Empty and false before any gameplay hook has run, because the lookup needs guest memory. `trusted` carries the same meaning as nameTrusted."
+    },
+    {
+      "name": "WorldToScreen",
+      "side": "client",
+      "signature": "WorldToScreen(x, y, z) -> sx, sy, depth",
+      "summary": "Projects a world point to normalized screen fractions (0..1, origin top-left) plus its distance in front of the camera. Returns nil when the point is BEHIND the camera or no projection is available.",
+      "category": "World",
+      "notes": "Nil means DO NOT DRAW - it must not be read as 'off screen at 0,0', which would pin an overlay to the top-left corner every time the player skates past the point. Coordinates outside 0..1 are legitimate and mean 'in front of you but off to the side'. Only answers while the NATIVE renderer is engaged (skate3_native_render_scene): the view-projection it uses is published by the native scene build, which does not run in Emulated mode. Returns fractions rather than pixels so an overlay stays correct at any resolution or render scale."
+    },
+    {
+      "name": "GetCameraCoords",
+      "side": "client",
+      "signature": "GetCameraCoords() -> x, y, z",
+      "summary": "The camera position of the last published frame, or nil when unavailable.",
+      "category": "World",
+      "notes": "Exposed because a ROTATING radar needs to know which way the player is facing: the horizontal vector from the camera to the skater is the direction the player is looking, which is a much smaller thing to trust than unpicking a view matrix out of the frame's combined view-projection - and it stays sane mid-flip, where a board heading does not. Same Native-renderer-only limitation as WorldToScreen."
+    },
+    {
+      "name": "GetTrickPatternClass",
+      "side": "client",
+      "signature": "GetTrickPatternClass(id) -> number",
+      "summary": "The trick's pattern class: 1 air, 2 flip, 3 fingerflip, 4 grab, 5 grind, 6 handplant, 7 nocomply, 8 manual, 9 slide, 10 hippyjump, 11 revert, 12 boneless, 13 footplant. 0 unknown.",
+      "category": "Tricks"
+    },
+    {
+      "name": "IsControlPressed",
+      "side": "client",
+      "signature": "IsControlPressed(name) -> bool",
+      "summary": "Whether a control is held right now.",
+      "category": "Input",
+      "notes": "Controls are NAMED, not numbered. An unknown name reads as never pressed, so a typo behaves like an untouched control. UP/DOWN/LEFT/RIGHT mean the D-PAD only; the left stick is LSTICKUP and friends - see the controls block."
+    },
+    {
+      "name": "IsControlJustPressed",
+      "side": "client",
+      "signature": "IsControlJustPressed(name) -> bool",
+      "summary": "Whether a control was pressed since the previous script tick.",
+      "category": "Input",
+      "notes": "Edges are accumulated between script ticks rather than read live, because input samples at frame rate on a different clock - reading the held state live would silently drop short presses."
+    },
+    {
+      "name": "IsControlJustReleased",
+      "side": "client",
+      "signature": "IsControlJustReleased(name) -> bool",
+      "summary": "Whether a control was released since the previous script tick.",
+      "category": "Input"
+    },
+    {
+      "name": "GetControlValue",
+      "side": "client",
+      "signature": "GetControlValue(axis) -> number",
+      "summary": "Analog axis: -1..1 for sticks (LX, LY, RX, RY), 0..1 for triggers (LT, RT).",
+      "category": "Input"
+    },
+    {
+      "name": "IsPadConnected",
+      "side": "client",
+      "signature": "IsPadConnected() -> bool",
+      "summary": "Whether a gamepad is present, so a script can offer a keyboard fallback rather than silently doing nothing.",
+      "category": "Input"
+    },
+    {
+      "name": "GetSkaters",
+      "side": "server",
+      "signature": "GetSkaters() -> { id, ... }",
+      "summary": "Every connected player's id, from the relay's own presence tracking.",
+      "category": "Server"
+    },
+    {
+      "name": "GetSkater",
+      "side": "server",
+      "signature": "GetSkater(id) -> table",
+      "summary": "One player: id, name, x/y/z, mapHash, bucket, valid, idleMs. `valid` is false before that player has spawned.",
+      "category": "Server"
+    },
+    {
+      "name": "GetPlayerName",
+      "side": "server",
+      "signature": "GetPlayerName(id) -> string",
+      "summary": "A connected player's display name.",
+      "category": "Server"
+    },
+    {
+      "name": "SetPlayerRoutingBucket",
+      "side": "server",
+      "signature": "SetPlayerRoutingBucket(id, bucket)",
+      "summary": "Moves a player into another routing bucket. Players only see and hear peers in the same bucket.",
+      "category": "Server"
+    },
+    {
+      "name": "GetPlayerRoutingBucket",
+      "side": "server",
+      "signature": "GetPlayerRoutingBucket(id) -> number",
+      "summary": "The player's current routing bucket.",
+      "category": "Server"
+    },
+    {
+      "name": "GetClothingCategories",
+      "side": "client",
+      "signature": "GetClothingCategories() -> { { name, count, custom }, ... }",
+      "summary": "Every wardrobe category in the extracted createacharacter.big catalogue with its item count. Empty while the archive is still being extracted at startup - ask again rather than treating it as an error.",
+      "category": "Wardrobe"
+    },
+    {
+      "name": "GetClothingCount",
+      "side": "client",
+      "signature": "GetClothingCount(category) -> number",
+      "summary": "How many items a category holds, retail plus any registered custom ids. 0 for an unknown category and for a catalogue that is not ready yet.",
+      "category": "Wardrobe"
+    },
+    {
+      "name": "GetClothingId",
+      "side": "client",
+      "signature": "GetClothingId(category, index) -> id | nil",
+      "summary": "One item MODEL id by 1-based position, for walking a category the way a menu would. nil when out of range. Model ids are what a recipe's piece names (measured: 12/12 worn model ids are catalogue entries, 0/12 asset ids are).",
+      "category": "Wardrobe"
+    },
+    {
+      "name": "ListClothing",
+      "side": "client",
+      "signature": "ListClothing(category [, filter [, limit=40]]) -> { id, ... }",
+      "summary": "Item MODEL ids in a category, optionally filtered by substring. Retail items first, then custom ones, so positions stay stable as customs are added.",
+      "category": "Wardrobe"
+    },
+    {
+      "name": "AddClothingId",
+      "side": "client",
+      "signature": "AddClothingId(category, id) -> boolean",
+      "summary": "Registers a MODEL id on top of the retail set so the listings report it; this is how custom clothing will be named. Does NOT make the asset loadable - false on a duplicate or empty name.",
+      "category": "Wardrobe"
+    },
+    {
+      "name": "GetSkaterOutfit",
+      "side": "client",
+      "signature": "GetSkaterOutfit() -> { { category, id, model, material }, ... } | nil",
+      "summary": "What the local skater is wearing, from the live cas_db recipe. Each piece carries an asset id AND a model id; only the MODEL id exists in the clothing catalogue. Ids are hex STRINGS because they are 64-bit and a Lua number would round them. nil before the skater exists in the world.",
+      "category": "Wardrobe"
+    },
+    {
+      "name": "SetClothingModel",
+      "side": "client",
+      "signature": "SetClothingModel(category, modelId) -> ok, message",
+      "summary": "Overrides a category's MODEL id in the live cas_db recipe, re-applied every time the recipe is read. The id is checked against the catalogue first. Peers see the change at once; retail rebuilds the local skater on its own schedule, so the local view may need a respawn. Material and textures are not overridden, so a swapped model keeps the previous item's material.",
+      "category": "Wardrobe"
+    },
+    {
+      "name": "ClearClothing",
+      "side": "client",
+      "signature": "ClearClothing([category])",
+      "summary": "Drops one category's override, or every override when called with no argument.",
+      "category": "Wardrobe"
+    },
+    {
+      "name": "GetClothingOverrides",
+      "side": "client",
+      "signature": "GetClothingOverrides() -> { { category, id }, ... }",
+      "summary": "The wardrobe overrides currently being applied to the live recipe.",
+      "category": "Wardrobe"
+    },
+    {
+      "name": "OpenCharacterEditor",
+      "side": "client",
+      "signature": "OpenCharacterEditor() -> ok, message",
+      "summary": "Opens retail's own skater editor by performing the transition the Career menu's Edit Skaters row performs - sub_8261AF30(menu, 63, 0), which ends in SetFrontEndState. Needs no menu context, so it works in Free Play where that row does not exist. See docs/frontend_bridge.md.",
+      "category": "Front end"
+    },
+    {
+      "name": "GetLastFrontEndState",
+      "side": "client",
+      "signature": "GetLastFrontEndState() -> number",
+      "summary": "Id of the most recent screen retail's front end was asked to show. The discovery tool for OpenCharacterEditor: walk to a screen by hand, then read this.",
+      "category": "Front end"
+    },
+    {
+      "name": "SendPadInput",
+      "side": "client",
+      "signature": "SendPadInput(sequence) -> ok, message",
+      "summary": "Replays pad presses at the layer the game reads its controller from, e.g. \"start,down,down,a\". Tokens: a b x y start back lb rb lt rt up down left right l3 r3, each optionally suffixed \":ms\" to change the delay after it. One sequence plays at a time.",
+      "category": "Front end"
+    },
+    {
+      "name": "GetFrontEndInfo",
+      "side": "client",
+      "signature": "GetFrontEndInfo() -> { state, manager, calls, history }",
+      "summary": "Diagnostics for retail's front-end state machine. `calls` is the useful one: if it does not move while you navigate to a screen, that screen is not driven by the state machine.",
+      "category": "Front end"
+    },
+    {
+      "name": "IsPlayerInGame",
+      "side": "client",
+      "signature": "IsPlayerInGame() -> boolean",
+      "summary": "True once the player is actually PLAYING. Use this, not IsPlayerSpawned, to decide when it is safe to act on the player: IsPlayerSpawned is backed by the skateboard transform, which exists while the world is still loading, so a thread waiting on it runs during the load screen. This also requires retail's gameplay presence context.",
+      "category": "Player state"
+    },
+    {
+      "name": "GetGameDifficulty",
+      "side": "client",
+      "signature": "GetGameDifficulty() -> name, index",
+      "summary": "The difficulty the game is actually using - 'easy', 'normal', 'hardcore' - read from the field retail itself reads, not from the menu. nil before the player is in the world.",
+      "category": "Game rules"
+    },
+    {
+      "name": "SetGameDifficulty",
+      "side": "client",
+      "signature": "SetGameDifficulty(nameOrIndex) -> ok, message",
+      "summary": "Overrides difficulty, for a scenario that wants one (a big-jump section on easy, say). The server's value is applied by the ENGINE on connect and is not a script's to decline; this is for temporary changes on top. Applied on the next physics tick.",
+      "category": "Game rules"
+    },
+    {
+      "name": "IsEverythingUnlocked",
+      "side": "client",
+      "signature": "IsEverythingUnlocked() -> wanted, applied, forced",
+      "summary": "Whether every progression unlock is being treated as earned. Three answers because they can all differ: `wanted` is whether it will be on at all, `applied` is whether retail's progression manager is actually carrying the flag - which it cannot be until the manager has been constructed - and `forced` is whether the online session decided, in which case the setting is not being consulted. If `applied` is false, wait for IsPlayerInGame() and ask again.",
+      "category": "Game rules"
+    },
+    {
+      "name": "SetUnlockEverything",
+      "side": "client",
+      "signature": "SetUnlockEverything(on) -> effective",
+      "summary": "Turns the unlock-everything flag on or off, and returns what the answer will actually BE. This is retail's own switch, not a display hook: the progression manager carries a byte that makes every unlock query answer yes, so the padlock, an item's unlock blurb and the code that decides whether you may WEAR it all agree at once. AN ONLINE SESSION FORCES IT ON and no resource can opt out - everyone joining has the same wardrobe, which is a rule of the session decided in the engine - so turning it off online does nothing and this returns true. Offline it is off by default - a career keeps its progression - and turning it on applies on the next frame and is reversible. Runtime only either way: the flag lives in a heap object rebuilt each launch, so it cannot reach a save file.",
+      "category": "Game rules"
+    },
+    {
+      "name": "GetGameMode",
+      "side": "client",
+      "signature": "GetGameMode() -> number",
+      "summary": "Retail's game-mode global. Career is 1, the world load is 0, Free Play is 3. An online launch is forced to Free Play by the engine before the world loads, which is what stops career challenges existing at all.",
+      "category": "Game rules"
+    },
+    {
+      "name": "SetGameMode",
+      "side": "client",
+      "signature": "SetGameMode(n) -> boolean",
+      "summary": "Writes the game-mode global. This is the flag, not a mode CHANGE - the game also loads and spawns per mode, so setting it after a world has loaded does not unload what that world brought with it.",
+      "category": "Game rules"
+    },
+    {
+      "name": "SpawnProp",
+      "side": "client",
+      "signature": "SpawnProp(path, x, y, z [, lod [, networked]]) -> handle, message",
+      "summary": "Places a world prop from a .skateobj package. Networked props are given an id by the server and streamed to every client near them; local ones exist only here.",
+      "category": "Props"
+    },
+    {
+      "name": "CreateProp",
+      "side": "client",
+      "signature": "CreateProp(path, x, y, z, lod, networked) -> handle, message",
+      "summary": "SpawnProp with every argument explicit.",
+      "category": "Props"
+    },
+    {
+      "name": "ListProps",
+      "side": "client",
+      "signature": "ListProps([filter [, limit]]) -> { path, ... }",
+      "summary": "Prop packages staged next to the executable, filtered by substring.",
+      "category": "Props"
+    },
+    {
+      "name": "SetPropLod",
+      "side": "client",
+      "signature": "SetPropLod(handle, lod) -> boolean",
+      "summary": "Changes how far away a spawned prop keeps drawing.",
+      "category": "Props"
+    },
+    {
+      "name": "GetClothingStats",
+      "side": "client",
+      "signature": "GetClothingStats() -> { examined, patched, rejected }",
+      "summary": "Diagnostics for the wardrobe recipe override: how often the live recipe was checked, rewritten, and how often a rewrite was thrown away by its own verify.",
+      "category": "Wardrobe"
+    },
+    {
+      "name": "CallFlashMethod",
+      "side": "client",
+      "signature": "CallFlashMethod(methodId [, addr ...]) -> ok, message",
+      "summary": "Invokes a named ActionScript method on retail's front end through its own dispatcher. Arguments are guest addresses. See docs/frontend_bridge.md; note that ScreenManager.OpenScreen does nothing when called this way.",
+      "category": "Front end"
+    },
+    {
+      "name": "StartCoverage",
+      "side": "client",
+      "signature": "StartCoverage() -> true",
+      "summary": "Arms retail function coverage. With a capture either side of an action, the difference is that action's code - which is how the game-mode values, the padlock source and the menu bindings were all found.",
+      "category": "Diagnostics"
+    },
+    {
+      "name": "StopCoverage",
+      "side": "client",
+      "signature": "StopCoverage(label) -> count, path",
+      "summary": "Disarms coverage and writes the addresses next to the executable. Note the capture records basic-block labels, not function entries, and small functions with no branches never appear at all.",
+      "category": "Diagnostics"
+    },
+    {
+      "name": "FindGuestString",
+      "side": "client",
+      "signature": "FindGuestString(text [, limit]) -> { '0x...', ... }",
+      "summary": "Searches the running game's memory for text. How retail's own names are located in THIS build: the shipped image is encrypted, so its strings cannot be read from disk.",
+      "category": "Diagnostics"
+    },
+    {
+      "name": "FindGuestRef",
+      "side": "client",
+      "signature": "FindGuestRef(address [, limit]) -> { '0x...', ... }",
+      "summary": "Word-aligned places holding a value. Walking back from a name to whatever points at it is how a table is identified.",
+      "category": "Diagnostics"
+    },
+    {
+      "name": "ReadGuestU32",
+      "side": "client",
+      "signature": "ReadGuestU32(address) -> '0x........' or nil",
+      "summary": "Reads one 32-bit word of guest memory.",
+      "category": "Diagnostics"
+    },
+    {
+      "name": "ReadGuestString",
+      "side": "client",
+      "signature": "ReadGuestString(address [, max]) -> string or nil",
+      "summary": "Reads a NUL-terminated string from guest memory, or nil when it is not plausibly text.",
+      "category": "Diagnostics"
+    },
+    {
+      "name": "GetConvar",
+      "side": "server",
+      "signature": "GetConvar(name [, default]) -> string",
+      "summary": "Any 'key value' line in server.cfg that is not one of the server's own directives - game_difficulty, for instance. Lets a game mode carry its own settings without the server needing to know what they mean.",
+      "category": "Server"
+    },
+    {
+      "name": "DumpGuestWords",
+      "side": "client",
+      "signature": "DumpGuestWords(address, count [, name]) -> count, path",
+      "summary": "Writes a run of guest words to JSON next to the executable, each with the string it points at when it points at one. For reading a table: the console loses entries and is slow to page through. This is how the menu action table and the screen registry were read.",
+      "category": "Diagnostics"
+    }
+  ],
+  "controls": {
+    "gamepad_buttons": [
+      "A",
+      "B",
+      "X",
+      "Y",
+      "LB",
+      "RB",
+      "LT",
+      "RT",
+      "BACK",
+      "START",
+      "LSTICK",
+      "RSTICK",
+      "DPADUP",
+      "DPADDOWN",
+      "DPADLEFT",
+      "DPADRIGHT"
+    ],
+    "gamepad_aliases": {
+      "UP": "DPADUP",
+      "DOWN": "DPADDOWN",
+      "LEFT": "DPADLEFT",
+      "RIGHT": "DPADRIGHT"
+    },
+    "left_stick_directions": [
+      "LSTICKUP",
+      "LSTICKDOWN",
+      "LSTICKLEFT",
+      "LSTICKRIGHT"
+    ],
+    "gamepad_axes": [
+      "LX",
+      "LY",
+      "RX",
+      "RY",
+      "LT",
+      "RT"
+    ],
+    "keyboard": [
+      "KEY_A .. KEY_Z",
+      "KEY_0 .. KEY_9",
+      "KEY_SPACE",
+      "KEY_ENTER",
+      "KEY_ESCAPE",
+      "KEY_TAB",
+      "KEY_SHIFT",
+      "KEY_CTRL",
+      "KEY_ALT",
+      "KEY_UP",
+      "KEY_DOWN",
+      "KEY_LEFT",
+      "KEY_RIGHT"
+    ],
+    "notes": [
+      "The bare direction names UP/DOWN/LEFT/RIGHT alias the D-PAD only, never the left stick. Steering a skateboard holds the stick almost constantly, so folding it into these names would fire markers by accident. The stick has its own LSTICK* names, digital past a deliberate 0.6 push.",
+      "The D-pad reports the real controller's bit OR the key bound to that direction in the keyboard driver's keybind cvars (keybind_dpad_up and friends), re-read every frame so rebinding follows. Needed because the SDK's keyboard driver deliberately excludes its emulated pad from the UI input path, which left keyboard players with a D-pad that did nothing for scripts while the game itself saw the press.",
+      "The pad half is never gated: a marker you hold a direction on works whatever else is on screen.",
+      "The keyboard half IS gated - it reports nothing while a menu, the F7 console or a focused NUI page owns the keyboard, so typing a console command cannot also drive a game mode. Verified by pressing all four arrows with the console open and seeing nothing reach scripts."
+    ]
+  },
+  "sk8manifest": {
+    "filename": "sk8manifest.lua",
+    "fields": [
+      "name",
+      "shared_scripts",
+      "client_scripts",
+      "server_scripts",
+      "ui_page",
+      "files"
+    ],
+    "notes": [
+      "The file is sk8manifest.lua, NOT fxmanifest.lua. Deliberately a different name so FiveM tooling does not treat a resource here as one of its own and rewrite it.",
+      "Fields are ASSIGNMENTS, not calls: `client_scripts = { 'client.lua' }`, never FiveM's `client_script 'client.lua'`. A manifest is executed as real Lua with NO libraries loaded - which is what keeps a manifest from touching the filesystem just by being read - so FiveM's call syntax invokes a nil global and fails the whole manifest, leaving the resource discovered but running nothing.",
+      "There is no fx_version or game line, and neither is read.",
+      "Every field accepts the singular string or the plural table form (client_script or client_scripts).",
+      "ui_page is implicitly servable even when not repeated in files."
+    ]
+  }
+}

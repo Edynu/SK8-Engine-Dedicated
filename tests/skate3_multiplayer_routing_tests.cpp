@@ -149,6 +149,112 @@ void TestAuthenticatedVisualRelay() {
          "role reuse did not route to new authenticated generation");
 }
 
+void TestRelayInterestManagement() {
+  VisualRelayRouter relay;
+  Expect(relay.Register({.connection_id = 1, .role = 1, .session = 100}),
+         "peer 1 did not register");
+  Expect(relay.Register({.connection_id = 2, .role = 2, .session = 200}),
+         "peer 2 did not register");
+  Expect(relay.Register({.connection_id = 3, .role = 3, .session = 300}),
+         "peer 3 did not register");
+
+  const auto source = Datagram(1, 100);
+
+  // Before any beacon arrives every peer defaults to map_hash 0 / no known
+  // position, so a fresh join is never silently excluded.
+  {
+    const auto route = relay.Route(1, source);
+    Expect(route.disposition == RelayDisposition::kForward &&
+               route.recipient_connections ==
+                   (std::vector<std::uint64_t>{2, 3}),
+           "unbeaconed peers were excluded from broadcast");
+  }
+
+  // Peer 2 joins a different map; peer 3 stays on the sender's map.
+  Expect(relay.UpdatePresence(1, /*map_hash=*/111, 0.0f, 0.0f, 0.0f, 1000),
+         "presence update for connection 1 failed");
+  Expect(relay.UpdatePresence(2, /*map_hash=*/222, 0.0f, 0.0f, 0.0f, 1000),
+         "presence update for connection 2 failed");
+  Expect(relay.UpdatePresence(3, /*map_hash=*/111, 500.0f, 0.0f, 0.0f, 1000),
+         "presence update for connection 3 failed");
+  {
+    const auto route = relay.Route(1, source);
+    Expect(route.disposition == RelayDisposition::kForward &&
+               route.recipient_connections == std::vector<std::uint64_t>{3},
+           "relay broadcast a different map to a peer");
+  }
+
+  // Same map, but far outside a configured radius: excluded.
+  {
+    const auto route = relay.Route(1, source, /*target_role=*/0,
+                                   /*radius=*/10.0f);
+    Expect(route.disposition == RelayDisposition::kForward &&
+               route.recipient_connections.empty(),
+           "relay broadcast beyond the configured radius");
+  }
+
+  // Move peer 3 within radius: included again.
+  Expect(relay.UpdatePresence(3, 111, 5.0f, 0.0f, 0.0f, 1001),
+         "presence update did not move peer 3 into range");
+  {
+    const auto route = relay.Route(1, source, /*target_role=*/0,
+                                   /*radius=*/10.0f);
+    Expect(route.disposition == RelayDisposition::kForward &&
+               route.recipient_connections == std::vector<std::uint64_t>{3},
+           "relay excluded a peer that moved back into radius");
+  }
+
+  // Stale eviction.
+  const auto removed = relay.RemoveStale(/*now_us=*/2'000'000,
+                                         /*timeout_us=*/500'000);
+  Expect(removed.size() == 3 && relay.peer_count() == 0,
+         "stale peers were not evicted");
+}
+
+void TestRelayHandshakeCodecs() {
+  std::array<std::uint8_t, kPresenceBeaconPayloadBytes> beacon_bytes{};
+  const PresenceBeacon beacon{.map_hash = 0x1234, .x = 1.5f, .y = -2.5f,
+                              .z = 3.0f};
+  Expect(EncodePresenceBeacon(beacon, beacon_bytes),
+         "presence beacon did not encode");
+  PresenceBeacon decoded_beacon;
+  Expect(DecodePresenceBeacon(beacon_bytes, decoded_beacon) &&
+             decoded_beacon.map_hash == beacon.map_hash &&
+             decoded_beacon.x == beacon.x && decoded_beacon.y == beacon.y &&
+             decoded_beacon.z == beacon.z,
+         "presence beacon did not round-trip");
+
+  std::array<std::uint8_t, kRelayRegisterPayloadBytes> register_bytes{};
+  const RelayRegister request{
+      .requested_map_hash = 0xAAAA, .token_hash = 0, .client_nonce = 42};
+  Expect(EncodeRelayRegister(request, register_bytes),
+         "relay register did not encode");
+  RelayRegister decoded_request;
+  Expect(DecodeRelayRegister(register_bytes, decoded_request) &&
+             decoded_request.requested_map_hash == request.requested_map_hash &&
+             decoded_request.client_nonce == request.client_nonce,
+         "relay register did not round-trip");
+  const RelayRegister invalid_request{.client_nonce = 0};
+  Expect(!EncodeRelayRegister(invalid_request, register_bytes),
+         "relay register accepted a zero nonce");
+
+  std::array<std::uint8_t, kRelayRegisterAckPayloadBytes> ack_bytes{};
+  const RelayRegisterAck ack{.assigned_role = 7,
+                             .status = RelayRegisterStatus::kOk,
+                             .assigned_session = 999};
+  Expect(EncodeRelayRegisterAck(ack, ack_bytes),
+         "relay register ack did not encode");
+  RelayRegisterAck decoded_ack;
+  Expect(DecodeRelayRegisterAck(ack_bytes, decoded_ack) &&
+             decoded_ack.assigned_role == ack.assigned_role &&
+             decoded_ack.status == ack.status &&
+             decoded_ack.assigned_session == ack.assigned_session,
+         "relay register ack did not round-trip");
+  const RelayRegisterAck rejected{.status = RelayRegisterStatus::kFull};
+  Expect(EncodeRelayRegisterAck(rejected, ack_bytes),
+         "a rejection ack with no assigned role/session did not encode");
+}
+
 class RecordingTransport final : public TransportAdapter {
  public:
   [[nodiscard]] TransportKind kind() const override {
@@ -232,12 +338,90 @@ void TestTransportBatchContract() {
          "transport queue snapshot lost batch accounting");
 }
 
+
+// Hot zones: density has to bound what one client receives, because the
+// relay's egress is O(recipients x senders) and a skate spot puts everyone
+// inside everyone else's high band at once.
+void TestCrowdFidelity() {
+  using skate3::multiplayer::routing::CrowdPolicy;
+  using skate3::multiplayer::routing::DegradeForCrowd;
+  using skate3::multiplayer::routing::FidelityLevel;
+
+  const CrowdPolicy policy{.medium_above = 8, .low_above = 20};
+
+  Expect(DegradeForCrowd(FidelityLevel::kFull, 4, policy) ==
+             FidelityLevel::kFull,
+         "a quiet area must not be thinned");
+  Expect(DegradeForCrowd(FidelityLevel::kFull, 12, policy) ==
+             FidelityLevel::kHalfDeltas,
+         "a busy area drops one band");
+  Expect(DegradeForCrowd(FidelityLevel::kFull, 40, policy) ==
+             FidelityLevel::kKeyframesOnly,
+         "a packed area drops two bands");
+
+  // Degradation stacks on distance rather than replacing it: someone far
+  // away in a crowd is thinned by both.
+  Expect(DegradeForCrowd(FidelityLevel::kHalfDeltas, 12, policy) ==
+             FidelityLevel::kKeyframesOnly,
+         "crowd degradation must compose with distance banding");
+
+  // Never past keyframes: thinning those would freeze the peer rather than
+  // reduce its detail, which reads as a bug and not as a lower LOD.
+  Expect(DegradeForCrowd(FidelityLevel::kKeyframesOnly, 999, policy) ==
+             FidelityLevel::kKeyframesOnly,
+         "keyframes must survive any crowd");
+
+  // Out of range is already excluded; density must not resurrect it.
+  Expect(DegradeForCrowd(FidelityLevel::kOutOfRange, 999, policy) ==
+             FidelityLevel::kOutOfRange,
+         "out-of-range must stay excluded");
+
+  // An unconfigured policy is inert, so enabling hot zones is opt-in.
+  Expect(DegradeForCrowd(FidelityLevel::kFull, 5000, CrowdPolicy{}) ==
+             FidelityLevel::kFull,
+         "an unset policy must change nothing");
+}
+
+// Neighbour counting is what feeds the policy, and it must respect the same
+// isolation the router itself enforces.
+void TestCrowdCounting() {
+  VisualRelayRouter relay;
+  for (std::uint32_t id = 1; id <= 4; ++id) {
+    Expect(relay.Register({.connection_id = id, .role = id, .session = id * 10}),
+           "peer did not register");
+  }
+  // 1, 2, 3 stand together; 4 is far away on the same map.
+  Expect(relay.UpdatePresence(1, 7, 0.0f, 0.0f, 0.0f, 10), "presence 1");
+  Expect(relay.UpdatePresence(2, 7, 5.0f, 0.0f, 0.0f, 10), "presence 2");
+  Expect(relay.UpdatePresence(3, 7, 0.0f, 0.0f, 5.0f, 10), "presence 3");
+  Expect(relay.UpdatePresence(4, 7, 900.0f, 0.0f, 0.0f, 10), "presence 4");
+
+  relay.RefreshCrowdCounts(100.0f);
+  Expect(relay.PeakNeighbours() == 2,
+         "three co-located peers should each see two neighbours");
+
+  // A peer in another routing bucket shares the spot physically but can
+  // never be routed to, so it must not inflate the crowd.
+  Expect(relay.SetBucket(3, 1), "bucket assignment failed");
+  relay.RefreshCrowdCounts(100.0f);
+  Expect(relay.PeakNeighbours() == 1,
+         "a peer in another bucket must not count toward the crowd");
+
+  relay.RefreshCrowdCounts(0.0f);
+  Expect(relay.PeakNeighbours() == 0,
+         "a disabled radius must report no crowd");
+}
+
 }  // namespace
 
 int main() {
   TestTopologyPolicyAndBudgets();
   TestAuthenticatedVisualRelay();
+  TestRelayInterestManagement();
+  TestRelayHandshakeCodecs();
   TestTransportBatchContract();
+  TestCrowdFidelity();
+  TestCrowdCounting();
   if (g_failures != 0) {
     std::cerr << g_failures << " routing/transport test(s) failed\n";
     return 1;

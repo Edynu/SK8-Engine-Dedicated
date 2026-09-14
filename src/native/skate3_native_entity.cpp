@@ -91,6 +91,12 @@ struct EntityRec {
   uint32_t vtable = 0;
   int32_t view_refs = 0;
   uint64_t bind_count = 0;
+  // Every distinct cModelInstance ("rec" in the BindConstants walk below)
+  // seen for this entity - typically several (body, board, garments...),
+  // each owning its own bone/rigid-part world palette (m_matrices at
+  // +0x14/+0x18, same struct ServeInstancePalette already reads). Needed
+  // to rigidly translate the WHOLE visible character, not just one part.
+  std::vector<uint32_t> instances;
 };
 
 struct CtxEntry {
@@ -267,6 +273,10 @@ void OnBindConstants(uint8_t* base, uint32_t entity) {
   er.bind_count++;
   for (uint32_t i = 0; i < nctx; ++i) {
     g_ctx[ctxs[i].ctx] = {entity, ctxs[i].instance};
+    if (std::find(er.instances.begin(), er.instances.end(),
+                  ctxs[i].instance) == er.instances.end()) {
+      er.instances.push_back(ctxs[i].instance);
+    }
   }
 }
 
@@ -498,6 +508,46 @@ bool ReadEntityWorldRows(uint8_t* base, uint32_t ctx, float out_rows[12]) {
   CtxInfo info;
   return LookupCtx(ctx, &info) &&
          ReadWorldRowsChecked(base, info.entity, out_rows);
+}
+
+std::vector<uint32_t> EntityInstances(uint32_t entity) {
+  std::lock_guard<std::mutex> lock(g_mu);
+  const auto it = g_entities.find(entity);
+  if (it == g_entities.end()) {
+    return {};
+  }
+  return it->second.instances;
+}
+
+std::vector<uint32_t> LiveSkaterFamilyEntities() {
+  std::vector<uint32_t> out;
+  if (!REXCVAR_GET(skate3_native_render_scene_entity_ident)) {
+    return out;
+  }
+  std::lock_guard<std::mutex> lock(g_mu);
+  out.reserve(g_entities.size());
+  for (const auto& [addr, rec] : g_entities) {
+    if (rec.view_refs <= 0) {
+      continue;
+    }
+    if (rec.cls == EntClass::kSkater || rec.cls == EntClass::kColorized ||
+        rec.cls == EntClass::kCac || rec.cls == EntClass::kSkaterAux) {
+      out.push_back(addr);
+    }
+  }
+  return out;
+}
+
+bool ReadSkaterEntityWorldPosition(uint8_t* base, uint32_t entity,
+                                   float out_xyz[3]) {
+  float rows[12];
+  if (!ReadWorldRowsChecked(base, entity, rows)) {
+    return false;
+  }
+  out_xyz[0] = rows[3];
+  out_xyz[1] = rows[7];
+  out_xyz[2] = rows[11];
+  return true;
 }
 
 bool ReadSkaterFade(uint8_t* base, uint32_t ctx, float* out_alpha) {

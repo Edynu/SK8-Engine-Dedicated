@@ -1,0 +1,39 @@
+/* Composited over the game, so the document itself must stay transparent. */
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  /* Belt and braces alongside the frame-level rule: nothing here is
+     clickable, so nothing here should ever be hit-tested. */
+  pointer-events: none;
+  user-select: none;
+  cursor: none;
+}
+
+#prompt[hidden] { display: none; }
+
+#prompt {
+  position: absolute;
+  left: 50%;
+  bottom: 12%;
+  transform: translateX(-50%);
+  padding: 12px 22px;
+  border-radius: 999px;
+  background: rgba(10, 11, 14, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  color: #e8eaed;
+  font-size: 17px;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  animation: rise 140ms ease-out;
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}

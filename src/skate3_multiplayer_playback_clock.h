@@ -18,6 +18,7 @@ class PresentationClock {
   // making the remote player visibly surge forward or pull backward.
   static constexpr std::int64_t kCorrectionDivisor = 40;
 
+
   std::int64_t Advance(std::int64_t local_time_us,
                        std::int64_t ideal_sender_time_us) {
     return AdvanceBounded(

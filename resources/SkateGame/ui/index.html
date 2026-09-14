@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- The area box is an SVG overlay: the client projects the eight
+         corners and this joins them, which is why it sits behind
+         everything else and never takes pointer events. -->
+    <svg id="area" viewBox="0 0 1000 1000" preserveAspectRatio="none" hidden>
+      <g id="areaEdges"></g>
+    </svg>
+
+    <div id="board" hidden>
+      <div id="players"></div>
+      <div id="status"></div>
+      <div id="log"></div>
+    </div>
+
+    <div id="toast" hidden></div>
+
+    <div id="menu" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <span>Call your trick</span>
+          <button id="close" type="button">Close</button>
+        </div>
+        <input id="filter" type="text" placeholder="Filter tricks..." />
+        <div id="list"></div>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

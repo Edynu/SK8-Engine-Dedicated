@@ -59,9 +59,16 @@ void TestConstantsAndMessageKind() {
   Envelope envelope = ControlEnvelope();
   Expect(EnvelopeShapeValid(envelope),
          "pose-control message kind was not accepted by envelope");
-  envelope.kind = static_cast<MessageKind>(10);
+  // Deliberately values that can never be a real kind, rather than "one
+  // past the last one we happen to have": this assertion was originally
+  // written as kind 10 and silently went stale the moment the relay kinds
+  // were added, since 10 became kPresenceBeacon.
+  envelope.kind = static_cast<MessageKind>(0);
   Expect(!EnvelopeShapeValid(envelope),
-         "unknown message kind after map edit was accepted");
+         "message kind below the first was accepted");
+  envelope.kind = static_cast<MessageKind>(200);
+  Expect(!EnvelopeShapeValid(envelope),
+         "message kind beyond the last was accepted");
 }
 
 void TestPoseControlGoldenBytesAndRoundTrip() {

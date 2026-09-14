@@ -618,3 +618,81 @@ add_test(
   NAME skate3_release_update_hash_tests
   COMMAND skate3_release_update_hash_tests
 )
+
+add_executable(skate3_multiplayer_reliable_channel_tests
+  skate3_multiplayer_reliable_channel_tests.cpp
+)
+
+target_include_directories(
+  skate3_multiplayer_reliable_channel_tests PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+)
+target_compile_features(
+  skate3_multiplayer_reliable_channel_tests PRIVATE cxx_std_23)
+
+if(MSVC)
+  target_compile_options(
+    skate3_multiplayer_reliable_channel_tests PRIVATE
+    /W4 /permissive- /utf-8)
+else()
+  target_compile_options(
+    skate3_multiplayer_reliable_channel_tests PRIVATE
+    -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(
+  NAME skate3_multiplayer_reliable_channel_tests
+  COMMAND skate3_multiplayer_reliable_channel_tests
+)
+
+add_executable(skate3_appearance_store_tests
+  skate3_appearance_store_tests.cpp
+)
+
+target_include_directories(
+  skate3_appearance_store_tests PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+)
+target_compile_features(
+  skate3_appearance_store_tests PRIVATE cxx_std_23)
+
+if(MSVC)
+  target_compile_options(
+    skate3_appearance_store_tests PRIVATE
+    /W4 /permissive- /utf-8)
+else()
+  target_compile_options(
+    skate3_appearance_store_tests PRIVATE
+    -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(
+  NAME skate3_appearance_store_tests
+  COMMAND skate3_appearance_store_tests
+)
+
+add_executable(skate3_prop_store_tests
+  skate3_prop_store_tests.cpp
+)
+
+target_include_directories(
+  skate3_prop_store_tests PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+)
+target_compile_features(
+  skate3_prop_store_tests PRIVATE cxx_std_23)
+
+if(MSVC)
+  target_compile_options(
+    skate3_prop_store_tests PRIVATE
+    /W4 /permissive- /utf-8)
+else()
+  target_compile_options(
+    skate3_prop_store_tests PRIVATE
+    -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(
+  NAME skate3_prop_store_tests
+  COMMAND skate3_prop_store_tests
+)

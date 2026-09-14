@@ -517,6 +517,28 @@ void SetSettingsMenuBlur(bool enabled);
 // Alex's settings-menu Gaussian so the existing menu remains unchanged.
 void SetVanillaUiBackdrop(bool enabled);
 
+// Lua dev console (F7): tells RenderScene/PostProcessGuestOutput whether to
+// draw the CEF overlay this frame, and (like the two setters above) keeps
+// the emulated-output post-processor armed while visible.
+void SetDevConsoleVisible(bool visible);
+
+// The guest_output pixel size DrawDevConsoleOverlay last actually drew
+// against (0,0 before the first draw). See g_dev_console_guest_output_w/h's
+// own comment for why the input dialog needs this rather than assuming it
+// matches the OS window's physical size.
+void GetLastDevConsoleGuestOutputSize(uint32_t& out_width, uint32_t& out_height);
+
+// NUI (resources' ui_pages): tells RenderScene/PostProcessGuestOutput
+// whether to composite the NUI browser this frame, and keeps the
+// emulated-output post-processor armed while it has content. Driven from
+// the NUI dialog once per frame off cef_nui::HasContent(), not from a
+// keybind - see g_nui_visible.
+void SetNuiVisible(bool visible);
+// The guest_output pixel size DrawNuiOverlay last actually drew against
+// (0,0 before the first draw), for converting window-pixel mouse
+// coordinates into the space NUI's own full-screen rect is defined in.
+void GetLastNuiGuestOutputSize(uint32_t& out_width, uint32_t& out_height);
+
 // The captured (un-overridden) sun direction, for the debug dialog's sun
 // override to seed its sliders from (unit vector toward the sun).
 void GetCapturedSunDir(float out[3]);
@@ -527,6 +549,33 @@ void GetCapturedSunDir(float out[3]);
 // drone; the render camera itself is taken over via the ViewCamera::
 // SetViewMatrix override in skate3_native_scene.cpp.
 bool FreecamGuestPose(float out_pos[3]);
+
+// --- Scripted camera (Lua) -----------------------------------------------
+//
+// A FiveM-shaped camera API for resources: CreateCam/SetCamCoord/PointCamAt
+// -Coord/SetCamActive. Independent of the freecam above - that one is
+// input-driven (WASD/mouse) and has been removed from player reach (no
+// keybind); this one is Lua-driven only, through the natives in
+// skate3_lua_client_natives.cpp. The two share the same underlying guest
+// -camera-override channel (g_freecam_guest_view/pos/active in the .cpp),
+// which is safe because only one can ever be engaged: the freecam requires
+// a keybind that no longer exists.
+//
+// Handles are 1-based small integers; 0 is never a valid handle (create
+// failed, or the argument was never a handle at all). Only one camera can
+// be ACTIVE (rendering) at a time, matching FiveM's own model where you
+// still need SetCamActive to make a created camera the one the game
+// actually renders through.
+int ScriptCamCreate();
+void ScriptCamDestroy(int handle);
+bool ScriptCamSetCoord(int handle, float x, float y, float z);
+// No target set yet: looks along +Z (this engine's forward at yaw=pitch=0),
+// matching what a freshly engaged freecam faces.
+bool ScriptCamPointAtCoord(int handle, float x, float y, float z);
+bool ScriptCamSetActive(int handle, bool active);
+bool ScriptCamIsActive(int handle);
+// 0 if no scripted camera is currently rendering.
+int ScriptCamGetActive();
 
 // True while the guest sits on a loading screen or in the frontend: the
 // presence context is out of gameplay AND the world has stopped publishing
@@ -747,5 +796,27 @@ void RequestSceneRingDump();
 // offline analysis replays candidate guard strategies against the real
 // board data.
 void RecordBoneSignal(double seconds);
+
+// Projects a world point into normalized screen space (0..1, origin
+// top-left), using the last published frame's view-projection.
+//
+// `out_depth` is the clip-space w, i.e. distance along the view direction:
+// positive is in front of the camera. Returns false when the point is
+// BEHIND the camera or when no scene has been published - callers must not
+// draw in either case, and must not treat a false return as "off screen at
+// 0,0". The returned x/y can legitimately fall outside 0..1 for a point
+// that is in front of the camera but outside the frustum sides.
+//
+// Only answers while the NATIVE scene renderer is engaged
+// (skate3_native_render_scene): BuildFrameScene, which publishes
+// view_proj, does not run at all in Emulated mode, so this returns false
+// there rather than projecting with a stale matrix.
+bool WorldToScreen(const float world[3], float& out_x, float& out_y,
+                   float& out_depth);
+
+// The camera position of the last published frame. Returns false when no
+// scene has been published, or in Emulated mode, for the same reason
+// WorldToScreen does.
+bool CameraPosition(float out_position[3]);
 
 }  // namespace skate3::native_scene

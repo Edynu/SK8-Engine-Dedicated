@@ -30,6 +30,38 @@ REXCVAR_DEFINE_BOOL(
     "remain active.")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+// Two separate cvars rather than one, deliberately: retail's mission sign-up
+// markers sit on world actors, but it is not yet known WHICH kind, and the
+// two suppressions cost very different things. Splitting them lets the
+// question be answered by bisection instead of by removing half the map and
+// hoping. Both reuse boundaries already proven inside the owned-world
+// sandbox; these gates just make them available on the retail map too, the
+// same way skate3_no_ai_skaters does.
+REXCVAR_DEFINE_BOOL(
+    skate3_no_retail_pedestrians, false, "Skate 3",
+    "Stop Living World pedestrians and vehicles spawning on the retail map. "
+    "Cheap to try: it removes ambient crowd and traffic and nothing the "
+    "player skates on.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_BOOL(
+    skate3_no_retail_scene_objects, false, "Skate 3",
+    "Stop retail scene DMOs and droppable dynamic objects spawning on the "
+    "retail map. BLUNT: DMOs include ordinary world props, so expect the map "
+    "to lose furniture as well as whatever else goes with it. Try "
+    "skate3_no_retail_pedestrians first.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_BOOL(
+    skate3_no_ai_skaters, false, "Skate 3",
+    "Stop Skate 3 spawning its own AI skaters, on the retail map as well as "
+    "in the owned custom world. Independent of the owned-world NPC path "
+    "system below: this one simply refuses every SkaterManager::SpawnAi "
+    "request. The local player, board, and Living World pedestrians and "
+    "vehicles are unaffected. Only takes effect on skaters spawned after "
+    "the change, so it needs a restart to clear a populated session.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 REXCVAR_DEFINE_BOOL(
     skate3_mechanics_sandbox_owned_npc_paths, true, "Skate 3",
     "Replace retail AI skater navigation with Blender-authored OW_NPC_PATHS "
@@ -258,6 +290,18 @@ void WithGuestCopy(PPCContext& ctx, std::uint8_t* base,
 
 }  // namespace
 
+bool SuppressingRetailWorldActors();
+
+bool SuppressingRetailPedestrians() {
+  return SuppressingRetailWorldActors() ||
+         REXCVAR_GET(skate3_no_retail_pedestrians);
+}
+
+bool SuppressingRetailSceneObjects() {
+  return SuppressingRetailWorldActors() ||
+         REXCVAR_GET(skate3_no_retail_scene_objects);
+}
+
 bool SuppressingRetailWorldActors() {
   // Requested(), rather than Active(), is intentional. Streamed scene actors
   // are created before the local skater is observed and the presentation
@@ -301,7 +345,7 @@ void AppendTelemetry(std::ostream& out) {
 // SceneBinDirectory::IsSceneWithDMOsEnabled. Returning false here prevents
 // streamed retail scenes from scheduling their DMO collections at all.
 extern "C" REX_FUNC(sub_828235F0) {
-  if (skate3::owned_world_boundary::SuppressingRetailWorldActors()) {
+  if (skate3::owned_world_boundary::SuppressingRetailSceneObjects()) {
     skate3::owned_world_boundary::RecordSuppression(
         skate3::owned_world_boundary::g_scene_dmo_queries_suppressed);
     ctx.r3.u64 = 0;
@@ -313,7 +357,7 @@ extern "C" REX_FUNC(sub_828235F0) {
 // Dmo::SimManager::SpawnStatic. This second boundary catches DMO bodies
 // requested by paths which do not consult the scene-directory capability.
 extern "C" REX_FUNC(sub_825876D0) {
-  if (skate3::owned_world_boundary::SuppressingRetailWorldActors()) {
+  if (skate3::owned_world_boundary::SuppressingRetailSceneObjects()) {
     skate3::owned_world_boundary::RecordSuppression(
         skate3::owned_world_boundary::g_static_dmo_spawns_suppressed);
     return;
@@ -324,7 +368,7 @@ extern "C" REX_FUNC(sub_825876D0) {
 // LivingWorld census spawn boundaries. Each original routine already has
 // normal null-return paths, so callers are designed to tolerate no actor.
 extern "C" REX_FUNC(sub_826B8038) {
-  if (skate3::owned_world_boundary::SuppressingRetailWorldActors()) {
+  if (skate3::owned_world_boundary::SuppressingRetailPedestrians()) {
     skate3::owned_world_boundary::RecordSuppression(
         skate3::owned_world_boundary::g_pedestrian_spawns_suppressed);
     ctx.r3.u64 = 0;
@@ -334,7 +378,7 @@ extern "C" REX_FUNC(sub_826B8038) {
 }
 
 extern "C" REX_FUNC(sub_82C36300) {
-  if (skate3::owned_world_boundary::SuppressingRetailWorldActors()) {
+  if (skate3::owned_world_boundary::SuppressingRetailPedestrians()) {
     skate3::owned_world_boundary::RecordSuppression(
         skate3::owned_world_boundary::g_vehicle_spawns_suppressed);
     ctx.r3.u64 = 0;
@@ -344,7 +388,7 @@ extern "C" REX_FUNC(sub_82C36300) {
 }
 
 extern "C" REX_FUNC(sub_82C4D440) {
-  if (skate3::owned_world_boundary::SuppressingRetailWorldActors()) {
+  if (skate3::owned_world_boundary::SuppressingRetailSceneObjects()) {
     // Skate 3 TU3 symbol:
     // LWDynamicObjectCensusMan::Spawn(LWEntitySpawnInfo const*).
     // This is the Living World droppable-prop boundary, not the shared
@@ -364,6 +408,28 @@ extern "C" REX_FUNC(sub_82C4D440) {
 // enter the world. The matrix copy keeps caller-owned guest memory immutable.
 extern "C" REX_FUNC(sub_82598600) {
   using namespace skate3::owned_world_boundary;
+  // Checked before the owned-world gate so it works on the retail map too.
+  // Returning without calling the original is how the existing suppression
+  // paths in this file work: SpawnAi's callers already tolerate a spawn
+  // that did not happen, because retail itself fails the call when the
+  // population budget is full.
+  if (REXCVAR_GET(skate3_no_ai_skaters)) {
+    const uint64_t suppressed =
+        g_ai_spawns_suppressed.fetch_add(1, std::memory_order_relaxed) + 1;
+    g_ai_spawn_requests.fetch_add(1, std::memory_order_relaxed);
+    // Logged, because "I still see AI skaters" has two very different
+    // causes - the cvar never reached the process, or SpawnAi is not the
+    // only way one gets created - and they are indistinguishable without
+    // knowing whether this ran at all. Rate-limited to the first few and
+    // then powers of two, so a busy census cannot flood the log.
+    if (suppressed <= 4 || (suppressed & (suppressed - 1)) == 0) {
+      REXLOG_WARN(
+          "skate3_no_ai_skaters: refused SkaterManager::SpawnAi "
+          "(#{}, caller=0x{:08X})",
+          suppressed, ctx.lr);
+    }
+    return;
+  }
   if (!CustomNpcPathsEnabled()) {
     __imp__sub_82598600(ctx, base);
     return;

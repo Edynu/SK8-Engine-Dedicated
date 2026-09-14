@@ -48,6 +48,11 @@ REXCVAR_DEFINE_INT32(skate3_demo_path_input_settle_ms, 2500, "Skate 3",
 REXCVAR_DEFINE_INT32(skate3_demo_path_input_delay_ms, 600, "Skate 3",
                      "Demo path: delay between injected gameplay inputs")
     .range(50, 10000);
+REXCVAR_DEFINE_STRING(skate3_character_editor_inputs, "", "Skate 3",
+                      "Pad sequence OpenCharacterEditor() replays to reach retail's "
+                      "Edit Skater screen, e.g. \"start,down,down,a\". Needed because "
+                      "that screen is not a front-end state - the state machine is not "
+                      "used after boot - so it has to be walked to");
 REXCVAR_DEFINE_BOOL(skate3_intro_movie_skip, true, "Skate 3",
                     "Skip the frontend intro movie when A or Start is pressed "
                     "(the default keyboard bindings make that Space and Enter)");
@@ -65,6 +70,19 @@ constexpr uint32_t kActiveUserIndex = 0x82FC8851;
 
 std::atomic<uint32_t> g_last_requested_state{0};
 std::atomic<uint32_t> g_last_frontend_manager{0};
+// Every state request, so a screen that never appears can be distinguished
+// from one that is requested under a number nobody guessed.
+constexpr std::size_t kFrontEndHistory = 16;
+struct FrontEndStateRecord {
+  uint32_t state_id = 0;
+  uint32_t mode = 0;
+  uint32_t manager = 0;
+  uint32_t caller_lr = 0;
+};
+FrontEndStateRecord g_frontend_history[kFrontEndHistory];
+std::atomic<std::size_t> g_frontend_history_next{0};
+std::atomic<uint64_t> g_frontend_state_calls{0};
+std::atomic<bool> g_sequence_playing{false};
 std::atomic<uint32_t> g_press_start_boot_flow{0};
 std::atomic<bool> g_seen_language_update{false};
 std::atomic<bool> g_direct_language_confirmed{false};
@@ -672,6 +690,23 @@ bool DirectBootLoadingVisualActive() {
 void ObserveFrontEndState(uint32_t manager, uint32_t state_id,
                           uint32_t mode, uint32_t caller_lr) {
   g_last_requested_state.store(state_id, std::memory_order_relaxed);
+  // The manager is recorded HERE, not in Skate3DemoPath_SetFrontEndStateHook.
+  // That hook looks like the natural place and is not: the codegen patch
+  // (ApplySkate3CodegenPatches.cmake) calls THIS function directly from the
+  // top of sub_82D0AFA0, so the hook never runs and anything it stored stayed
+  // zero - which is why requesting a state reported "the front end has not run
+  // yet" even after states had plainly been observed.
+  g_last_frontend_manager.store(manager, std::memory_order_relaxed);
+  g_frontend_state_calls.fetch_add(1, std::memory_order_relaxed);
+  {
+    const std::size_t slot =
+        g_frontend_history_next.fetch_add(1, std::memory_order_relaxed) %
+        kFrontEndHistory;
+    g_frontend_history[slot].state_id = state_id;
+    g_frontend_history[slot].mode = mode;
+    g_frontend_history[slot].manager = manager;
+    g_frontend_history[slot].caller_lr = caller_lr;
+  }
   if (ProbeEnabled()) {
     REXLOG_INFO(
         "Skate 3 demo path: FE SetState state={} ({}) mode={} manager=0x{:08X} lr=0x{:08X}",
@@ -683,9 +718,101 @@ uint32_t AutomationStage() {
   return g_automation_stage.load(std::memory_order_relaxed);
 }
 
+bool PlayInputSequence(const std::string& sequence, std::string& error) {
+  if (sequence.empty()) {
+    error = "empty input sequence";
+    return false;
+  }
+  struct Step {
+    uint16_t buttons;
+    uint8_t left_trigger;
+    uint8_t right_trigger;
+    int32_t delay_after_ms;
+  };
+  const int32_t default_delay_ms = REXCVAR_GET(skate3_demo_path_input_delay_ms);
+  std::vector<Step> steps;
+  std::stringstream stream(sequence);
+  std::string raw_token;
+  while (std::getline(stream, raw_token, ',')) {
+    const size_t begin = raw_token.find_first_not_of(" 	");
+    const size_t end = raw_token.find_last_not_of(" 	");
+    if (begin == std::string::npos) {
+      continue;
+    }
+    std::string name = raw_token.substr(begin, end - begin + 1);
+    int32_t delay_after_ms = default_delay_ms;
+    if (const size_t colon = name.find(':'); colon != std::string::npos) {
+      delay_after_ms = std::atoi(name.c_str() + colon + 1);
+      if (delay_after_ms <= 0) {
+        error = "bad delay in token '" + name + "'";
+        return false;
+      }
+      name.resize(colon);
+    }
+    const GameplayInputToken* token = FindGameplayInputToken(name);
+    if (token == nullptr) {
+      // Named rather than ignored: a typo that silently does nothing looks
+      // exactly like a menu that did not respond.
+      error = "unknown input token '" + name + "'";
+      return false;
+    }
+    steps.push_back(Step{token->buttons, token->left_trigger,
+                         token->right_trigger, delay_after_ms});
+  }
+  if (steps.empty()) {
+    error = "no inputs in sequence";
+    return false;
+  }
+  // One sequence at a time: two macros interleaving their presses would walk
+  // a menu somewhere neither intended.
+  bool expected = false;
+  if (!g_sequence_playing.compare_exchange_strong(expected, true,
+                                                  std::memory_order_acq_rel)) {
+    error = "an input sequence is already playing";
+    return false;
+  }
+  std::thread([steps] {
+    for (const Step& step : steps) {
+      const bool is_trigger =
+          step.left_trigger != 0 || step.right_trigger != 0;
+      rex::kernel::xam::QueueSyntheticInput(step.buttons, step.left_trigger,
+                                            step.right_trigger,
+                                            is_trigger ? 16 : 8);
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(step.delay_after_ms));
+    }
+    g_sequence_playing.store(false, std::memory_order_release);
+  }).detach();
+  return true;
+}
+
 uint32_t LastRequestedFrontEndState() {
   return g_last_requested_state.load(std::memory_order_relaxed);
 }
+
+uint32_t LastFrontEndManager() {
+  return g_last_frontend_manager.load(std::memory_order_relaxed);
+}
+
+uint64_t FrontEndStateCallCount() {
+  return g_frontend_state_calls.load(std::memory_order_relaxed);
+}
+
+std::vector<FrontEndStateEvent> RecentFrontEndStates() {
+  std::vector<FrontEndStateEvent> out;
+  const std::size_t next =
+      g_frontend_history_next.load(std::memory_order_relaxed);
+  const std::size_t count = next < kFrontEndHistory ? next : kFrontEndHistory;
+  for (std::size_t index = 0; index < count; ++index) {
+    const std::size_t slot = (next - count + index) % kFrontEndHistory;
+    out.push_back(FrontEndStateEvent{g_frontend_history[slot].state_id,
+                                     g_frontend_history[slot].mode,
+                                     g_frontend_history[slot].manager,
+                                     g_frontend_history[slot].caller_lr});
+  }
+  return out;
+}
+
 
 bool SeenLanguageUpdate() {
   return g_seen_language_update.load(std::memory_order_relaxed);
