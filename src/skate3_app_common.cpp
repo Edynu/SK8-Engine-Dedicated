@@ -1160,11 +1160,9 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer *drawer) {
   // so it never affects cursor or focus handling.
   render_mode_indicator_ =
       std::make_unique<skate3::RenderModeIndicator>(drawer);
-  // Floating names over other synced players - always on while online, no
-  // cvar, no keybind (see skate3_player_nameplates.h's own comment on why
-  // this is native rather than a toggle).
-  player_nameplate_overlay_ =
-      std::make_unique<skate3::PlayerNameplateOverlay>(drawer);
+  // Floating names over other synced players are no longer a dialog at all:
+  // they are world-space billboards published by skate3::nameplates::Update
+  // and drawn by the native renderer. Nothing to construct here.
   map_editor_spawn_dialog_ =
       std::make_unique<skate3::MapEditorSpawnDialog>(drawer);
   auto poll_vanilla_ui_gamepad = [this]() {
@@ -1555,7 +1553,6 @@ void Skate3BaseApp::OnShutdown() {
   release_updater_.reset();
   native_debug_dialog_.reset();
   render_mode_indicator_.reset();
-  player_nameplate_overlay_.reset();
   map_editor_spawn_dialog_.reset();
   dev_console_dialog_.reset();
   nui_dialog_.reset();

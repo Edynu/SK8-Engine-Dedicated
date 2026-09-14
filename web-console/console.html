@@ -34,6 +34,11 @@
   #log .line { padding: 1px 0; }
   #log .resource { color: #7fb0ff; }
   #log .console { color: #f2c94c; }
+  /* A script error is the one thing in here nobody should have to hunt for.
+     white-space: pre-wrap on #log already keeps the traceback's own
+     indentation, so the traceback reads as a traceback. */
+  #log .line.error { color: #ff8a80; }
+  #log .line.error .resource { color: #ff5252; }
   #input-row {
     position: absolute;
     left: 0;
@@ -82,7 +87,9 @@
 
   function appendLine(resource, text) {
     const div = document.createElement('div');
-    div.className = 'line';
+    // Matched on the prefix the host writes (ReportScriptError), rather than
+    // on a separate severity field, because the log sink carries plain lines.
+    div.className = text.indexOf('SCRIPT ERROR') === 0 ? 'line error' : 'line';
     if (resource) {
       div.innerHTML = '<span class="resource">[' + escapeHtml(resource) + ']</span> ' + escapeHtml(text);
     } else if (text.startsWith('[console]')) {

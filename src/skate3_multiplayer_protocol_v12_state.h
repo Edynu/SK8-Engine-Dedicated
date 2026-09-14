@@ -106,7 +106,7 @@ class PeerGenerationState {
       const GenerationIdentity& candidate,
       const ContentIdentity& expected_content,
       std::uint64_t transport_generation) {
-    if (candidate.role < 1 || candidate.role > 100 ||
+    if (candidate.role < 1 || candidate.role > kMaximumRole ||
         candidate.session == 0 || transport_generation == 0) {
       return GenerationActivation::kInvalid;
     }
@@ -183,7 +183,7 @@ class PoseReceiverState {
       std::uint16_t role, std::uint32_t session) {
     role_ = role;
     session_ = session;
-    active_ = role >= 1 && role <= 100 && session != 0;
+    active_ = role >= 1 && role <= kMaximumRole && session != 0;
     packet_history_.Clear();
     decoded_baseline_id_ = 0;
     decoded_baseline_sequence_ = 0;

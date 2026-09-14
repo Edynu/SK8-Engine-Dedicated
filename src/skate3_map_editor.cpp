@@ -1,5 +1,7 @@
 #include "skate3_map_editor.h"
 
+#include "skate3_multiplayer_protocol.h"
+
 #include "skate3_drop_item_import.h"
 #include "skate3_drop_item_library.h"
 #include "skate3_mechanics_sandbox_map.h"
@@ -545,7 +547,9 @@ bool RefreshSpawnObjects() {
 void SetMultiplayerSyncState(bool active, std::uint16_t local_role,
                              std::uint32_t local_session) {
   std::scoped_lock lock(g_mutex);
-  active = active && local_role >= 1 && local_role <= 100 && local_session != 0;
+  active = active && local_role >= 1 &&
+           local_role <= skate3::multiplayer::protocol::kMaximumRole &&
+           local_session != 0;
   if (g_multiplayer_sync_active == active &&
       g_multiplayer_local_role == (active ? local_role : 0) &&
       g_multiplayer_local_session == (active ? local_session : 0)) {

@@ -283,6 +283,7 @@ struct AdminHttpServer::Impl {
   AppearanceStoreHandler appearance_store;
   AppearanceFetchHandler appearance_fetch;
   AppearanceRosterProvider appearance_roster;
+  AppearanceCloneHandler appearance_clone;
   PropAddHandler prop_add;
   PropRemoveHandler prop_remove;
   PropQueryHandler prop_query;
@@ -420,6 +421,34 @@ AdminHttpServer::AdminHttpServer(LuaScriptHost& host,
     response.set_header("Pragma", "no-cache");
     response.set_content(data, mime.c_str());
   });
+
+  // Load-test only: point one role at another's stored appearance. Gated like
+  // the console routes rather than left open, because it lets a caller change
+  // what other players look like - harmless on a LAN test, not something to
+  // expose to anyone who can reach the server.
+  impl_->server.Post(
+      R"(/api/appearance/clone)",
+      [this](const httplib::Request &req, httplib::Response &res) {
+        if (!IsAdminAuthorized(req, impl_->admin_token, impl_->admin_access)) {
+          res.status = 403;
+          res.set_content("admin route: token required", "text/plain");
+          return;
+        }
+        if (!impl_->appearance_clone || !req.has_param("from") ||
+            !req.has_param("to")) {
+          res.status = 400;
+          res.set_content("{\"ok\":false}", "application/json");
+          return;
+        }
+        const auto from = static_cast<std::uint32_t>(
+            std::strtoul(req.get_param_value("from").c_str(), nullptr, 10));
+        const auto to = static_cast<std::uint32_t>(
+            std::strtoul(req.get_param_value("to").c_str(), nullptr, 10));
+        const bool ok = impl_->appearance_clone(from, to);
+        res.status = ok ? 200 : 404;
+        res.set_content(ok ? "{\"ok\":true}" : "{\"ok\":false}",
+                        "application/json");
+      });
 
   // ------------------------------------------------------- appearances
   //
@@ -743,6 +772,10 @@ void AdminHttpServer::SetAppearanceHandlers(AppearanceStoreHandler store,
   impl_->appearance_store = std::move(store);
   impl_->appearance_fetch = std::move(fetch);
   impl_->appearance_roster = std::move(roster);
+}
+
+void AdminHttpServer::SetAppearanceCloneHandler(AppearanceCloneHandler clone) {
+  impl_->appearance_clone = std::move(clone);
 }
 
 void AdminHttpServer::SetPropHandlers(PropAddHandler add,

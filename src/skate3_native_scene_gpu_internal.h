@@ -900,6 +900,36 @@ struct RendererState {
   // no z-write): darken = straight alpha, default = additive glow.
   nrhi::Pipeline* pso_spline_darken = nullptr;
   nrhi::Pipeline* pso_spline_default = nullptr;
+  // In-world marker / nameplate billboards, drawn in the MSAA scene pass.
+  // TWO depth variants of one shader, because the two callers want opposite
+  // things and the difference is genuinely a depth state, not a shader:
+  //   depth   - markers: depth test on, no z-write, so a marker behind a wall
+  //             is hidden like anything else in the world.
+  //   overlay - nameplates: depth test OFF, so a name is never swallowed by
+  //             geometry. Still world-anchored and perspective-scaled, which
+  //             is what makes this better than the ImGui overlay it replaces:
+  //             same always-visible behaviour, but composited inside the scene
+  //             pass with MSAA and the HDR encode, and no ImGui in the shipped
+  //             build.
+  nrhi::Pipeline* pso_marker_depth = nullptr;
+  nrhi::Pipeline* pso_marker_overlay = nullptr;
+  // Textured variant of the same billboard, for nameplate text. Depth-disabled
+  // like pso_marker_overlay.
+  nrhi::Pipeline* pso_marker_text = nullptr;
+
+  // One GPU texture per distinct rasterised string. Nameplates are a handful
+  // of strings that change only when somebody joins or renames, so they are
+  // uploaded once and then just drawn - which is why this is a cache keyed by
+  // the text rather than a glyph atlas.
+  struct TextTextureGpu {
+    nrhi::Texture* tex = nullptr;
+    nrhi::TextureView* srv = nullptr;
+    nrhi::Buffer* upload = nullptr;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint64_t last_used_frame = 0;
+  };
+  std::unordered_map<std::string, TextTextureGpu> text_textures;
   // Dynamic CSM shadows: casters render
   // into a 3-tile (depth, coverage) atlas with MIN blend (depth clear 1,
   // "uncoverage" clear 1 -> covered texels write 0), then the game's exact

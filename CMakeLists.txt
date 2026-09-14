@@ -417,6 +417,12 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_cac_catalogue.cpp
     src/skate3_clothing.cpp
     src/skate3_guest_probe.cpp
+    src/skate3_retail_score.cpp
+    src/skate3_retail_markers.cpp
+    src/skate3_retail_grind.cpp
+    src/skate3_retail_bail.cpp
+    src/skate3_world_markers.cpp
+    src/skate3_text_texture.cpp
     src/skate3_flash_bridge.cpp
     src/skate3_retail_ui_hooks.cpp
     src/skate3_cac_gesture.cpp
@@ -544,6 +550,7 @@ set(SKATE3_NATIVE_SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/hdr.hlsl
     ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/ssr.hlsl
     ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/dev_console.hlsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/marker.hlsl
 )
 # Shared .hlsli headers, inlined into the embedded sources by
 # EmbedShaders.cmake: the embed must rerun when any of them changes.
@@ -698,6 +705,23 @@ endif()
 target_link_libraries(skate3_dedicated PRIVATE lua httplib)
 if(WIN32)
     target_link_libraries(skate3_dedicated PRIVATE ws2_32)
+endif()
+
+# Load-test harness: replays a captured client as N virtual players. Links the
+# protocol headers only - no game, no renderer - so running 32 of these costs
+# almost nothing next to 32 real clients.
+add_executable(skate3_loadtest
+    tools/loadtest/skate3_loadtest.cpp
+)
+target_include_directories(skate3_loadtest PRIVATE src)
+target_compile_features(skate3_loadtest PRIVATE cxx_std_23)
+if(MSVC)
+    target_compile_options(skate3_loadtest PRIVATE /W4 /permissive- /utf-8)
+else()
+    target_compile_options(skate3_loadtest PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+if(WIN32)
+    target_link_libraries(skate3_loadtest PRIVATE ws2_32)
 endif()
 
 set(SKATE3_REXRUNTIME_TARGET rexruntime)

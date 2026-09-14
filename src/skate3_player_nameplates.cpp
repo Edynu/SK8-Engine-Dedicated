@@ -1,24 +1,25 @@
 #include "skate3_player_nameplates.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-#include <imgui.h>
+#include <chrono>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
-#include <rex/ui/presenter.h>
 
 #include "skate3_lua_client_natives.h"
 #include "skate3_multiplayer.h"
 #include "skate3_native_scene.h"
 
-namespace skate3 {
+namespace skate3::nameplates {
 
 namespace {
 
@@ -139,42 +140,68 @@ constexpr float kFadeStartDistance = 40.0f;
 // The head-bone anchor skips this entirely; see OnDraw.
 constexpr float kSmoothingTimeConstant = 0.05f;
 
+// World height of the text at full size, before the distance shrink.
+constexpr float kPlateHeight = 0.22f;
+
+// Per-role smoothed head position. A file-scope global now rather than a
+// dialog member, because the dialog is gone - see the header.
+struct SmoothedHead {
+  float position[3] = {};
+  bool initialized = false;
+};
+std::unordered_map<std::uint32_t, SmoothedHead> g_smoothed_heads;
+
+std::mutex g_plates_mutex;
+std::vector<Plate> g_plates;
+
+// Update derives its own delta rather than having one plumbed in, so the
+// render hook does not have to know or care that this needs one.
+std::chrono::steady_clock::time_point g_last_update{};
+
+void PublishPlates(std::vector<Plate> plates) {
+  std::lock_guard<std::mutex> lock(g_plates_mutex);
+  g_plates = std::move(plates);
+}
+
 }  // namespace
 
-void PlayerNameplateOverlay::OnDraw(ImGuiIO& io) {
-  // Nothing to draw offline: LatestRemotePlayers() is naturally empty with
-  // no session, but check the session flag directly anyway rather than
-  // infer "online" from "the list happens to be non-empty" - a moment
-  // between disconnect and the list clearing should not still draw stale
-  // names.
+void Update() {
+  const auto now = std::chrono::steady_clock::now();
+  float dt = 1.0f / 60.0f;
+  if (g_last_update.time_since_epoch().count() != 0) {
+    dt = std::chrono::duration<float>(now - g_last_update).count();
+  }
+  g_last_update = now;
+  // A long stall (a load, a breakpoint) would otherwise produce an ease of
+  // ~1 and snap every plate; clamping keeps the smoothing meaningful.
+  dt = std::clamp(dt, 1.0f / 480.0f, 0.1f);
+
+  // Nothing to draw offline. The session flag is checked directly rather than
+  // inferring "online" from a non-empty list, so the moment between
+  // disconnecting and the list clearing does not keep stale names up.
   if (!rex::cvar::Query<bool>("skate3_multiplayer_relay_active")) {
-    smoothed_heads_.clear();
+    g_smoothed_heads.clear();
+    PublishPlates({});
     return;
   }
-  // Pre-runtime (installer wizards) or no guest frame published yet - same
-  // guard RenderModeIndicator uses, for the same reason.
-  if (rex::ui::Presenter* presenter = imgui_drawer()->presenter()) {
-    const rex::ui::Presenter::GuestOutputPaintRect rect =
-        presenter->GetLastGuestOutputPaintRect();
-    if (rect.width <= 0 || rect.height <= 0) {
-      return;
-    }
-  }
+
   const std::shared_ptr<const std::vector<multiplayer::RemotePlayer>> players =
       multiplayer::LatestRemotePlayers();
   if (!players || players->empty()) {
-    smoothed_heads_.clear();
+    g_smoothed_heads.clear();
+    PublishPlates({});
     return;
   }
+
   float camera_position[3] = {};
   const bool have_camera = native_scene::CameraPosition(camera_position);
-  const float dt = io.DeltaTime > 0.0f ? io.DeltaTime : 1.0f / 60.0f;
   const float ease = 1.0f - std::exp(-dt / kSmoothingTimeConstant);
-
   const double head_clearance = REXCVAR_GET(skate3_nameplate_height);
 
+  std::vector<Plate> plates;
+  plates.reserve(players->size());
   std::unordered_set<std::uint32_t> seen_this_frame;
-  ImDrawList* draw_list = ImGui::GetForegroundDrawList();
+
   for (const multiplayer::RemotePlayer& player : *players) {
     seen_this_frame.insert(player.role);
     bool anchored_to_head = false;
@@ -201,8 +228,7 @@ void PlayerNameplateOverlay::OnDraw(ImGuiIO& io) {
       }
       // Must actually be above the root to be a head. This is what stops a
       // mis-identified bone - a foot, a wheel, the board - from dragging the
-      // tag down to ground level; the fixed offset below is wrong by a bit,
-      // but it is never wrong by a whole body.
+      // tag down to ground level.
       const bool plausibly_a_head =
           candidate[1] - player.pose.position[1] >= kMinimumHeadHeight;
       if (finite && plausibly_a_head &&
@@ -214,21 +240,13 @@ void PlayerNameplateOverlay::OnDraw(ImGuiIO& io) {
         anchored_to_head = true;
       }
     }
-    SmoothedHead& smoothed = smoothed_heads_[player.role];
-    if (anchored_to_head) {
-      // Deliberately NOT smoothed. The head bone is already the presentation
-      // pose the character mesh is drawn from this frame, so easing toward
-      // it could only make the tag lag the head it is supposed to sit on.
-      // Damping belongs on the raw replicated root below, not here.
-      smoothed.position[0] = raw_head[0];
-      smoothed.position[1] = raw_head[1];
-      smoothed.position[2] = raw_head[2];
-      smoothed.initialized = true;
-    } else if (!smoothed.initialized) {
-      // First frame this role has been seen (just connected, or the
-      // overlay just cleared on a reconnect) - snap straight to the raw
-      // position rather than easing in from (0,0,0), which would draw the
-      // tag sliding in from the world origin.
+
+    SmoothedHead& smoothed = g_smoothed_heads[player.role];
+    if (anchored_to_head || !smoothed.initialized) {
+      // The head bone is already the presentation pose the mesh is drawn
+      // from, so easing toward it could only make the tag lag the head it
+      // sits on. A first sighting snaps too, rather than sliding in from the
+      // world origin.
       smoothed.position[0] = raw_head[0];
       smoothed.position[1] = raw_head[1];
       smoothed.position[2] = raw_head[2];
@@ -251,27 +269,22 @@ void PlayerNameplateOverlay::OnDraw(ImGuiIO& io) {
         continue;
       }
     }
-    float screen_x = 0.0f, screen_y = 0.0f, depth = 0.0f;
-    if (!native_scene::WorldToScreen(head, screen_x, screen_y, depth)) {
-      continue;  // behind the camera
-    }
-    if (screen_x < 0.0f || screen_x > 1.0f || screen_y < 0.0f || screen_y > 1.0f) {
-      continue;  // off the edge of the frame
-    }
+
+    // No WorldToScreen and no frustum test any more: these are world-space
+    // billboards now, so the GPU clips them. Culling by screen rectangle here
+    // would only duplicate that - and got it subtly wrong, since a plate
+    // whose anchor was just off screen could still have visible text.
 
     std::string name = lua_client::PlayerName(static_cast<int>(player.role));
     if (name.empty()) {
-      // Not silently dropped: a player whose name has not arrived yet (a
-      // brief window right after they connect) still gets a placeholder,
-      // so "someone is there" is never invisible while "who" catches up.
+      // A player whose name has not arrived yet still gets a placeholder, so
+      // "someone is there" is never invisible while "who" catches up.
       char fallback[32];
       std::snprintf(fallback, sizeof(fallback), "Player %u", player.role);
       name = fallback;
     }
 
-    // Linear fade/shrink between kFadeStartDistance and kMaxDistance; full
-    // size and opacity closer than that. have_camera already gated the
-    // distance culling above, so this only runs when a distance exists.
+    // Linear fade/shrink between kFadeStartDistance and kMaxDistance.
     float scale = 1.0f;
     float alpha = 1.0f;
     if (have_camera && distance > kFadeStartDistance) {
@@ -281,38 +294,34 @@ void PlayerNameplateOverlay::OnDraw(ImGuiIO& io) {
       alpha = 1.0f - 0.7f * t;
     }
 
-    const float base_font_size = ImGui::GetFontSize();
-    const float font_size = base_font_size * scale;
-    const ImVec2 text_size =
-        ImGui::GetFont()->CalcTextSizeA(font_size, FLT_MAX, 0.0f, name.c_str());
-    const ImVec2 center(screen_x * io.DisplaySize.x, screen_y * io.DisplaySize.y);
-    const ImVec2 text_pos(center.x - text_size.x * 0.5f,
-                          center.y - text_size.y * 0.5f);
-
-    // A soft shadow rather than a background pill - readable over both
-    // bright sky and dark geometry without a box competing with the world
-    // for attention.
-    const ImU32 shadow_color = IM_COL32(0, 0, 0, static_cast<int>(160 * alpha));
-    const ImU32 text_color = IM_COL32(255, 255, 255, static_cast<int>(255 * alpha));
-    draw_list->AddText(ImGui::GetFont(), font_size,
-                       ImVec2(text_pos.x + 1.0f, text_pos.y + 1.0f), shadow_color,
-                       name.c_str());
-    draw_list->AddText(ImGui::GetFont(), font_size, text_pos, text_color,
-                       name.c_str());
+    Plate plate;
+    plate.position[0] = head[0];
+    plate.position[1] = head[1];
+    plate.position[2] = head[2];
+    plate.name = std::move(name);
+    plate.alpha = alpha;
+    plate.height = kPlateHeight * scale;
+    plates.push_back(std::move(plate));
   }
 
-  // Forget anyone not in this frame's list (left, or the role was reused
-  // by someone new) - otherwise a departed player's smoothing state sits
-  // around forever, and worse, would make a NEW player who is later
-  // assigned that same role number ease in from the old occupant's last
-  // position instead of snapping to their own.
-  for (auto it = smoothed_heads_.begin(); it != smoothed_heads_.end();) {
+  // Forget anyone not in this frame's list (left, or the role was reused by
+  // someone new) - otherwise a departed player's smoothing state sits around
+  // forever, and worse, a NEW player later assigned that role would ease in
+  // from the old occupant's last position instead of snapping to their own.
+  for (auto it = g_smoothed_heads.begin(); it != g_smoothed_heads.end();) {
     if (seen_this_frame.contains(it->first)) {
       ++it;
     } else {
-      it = smoothed_heads_.erase(it);
+      it = g_smoothed_heads.erase(it);
     }
   }
+
+  PublishPlates(std::move(plates));
 }
 
-}  // namespace skate3
+std::vector<Plate> Snapshot() {
+  std::lock_guard<std::mutex> lock(g_plates_mutex);
+  return g_plates;
+}
+
+}  // namespace skate3::nameplates

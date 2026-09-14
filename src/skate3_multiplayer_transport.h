@@ -26,7 +26,8 @@ struct TransportEndpoint {
   std::uint64_t generation = 0;
 
   [[nodiscard]] constexpr bool Valid() const {
-    return connection_id != 0 && role >= 1 && role <= 100 &&
+    return connection_id != 0 && role >= 1 &&
+           role <= protocol::kMaximumRole &&
            generation != 0;
   }
 

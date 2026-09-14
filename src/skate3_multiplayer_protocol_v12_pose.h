@@ -64,7 +64,7 @@ struct PoseGroupHeader {
 [[nodiscard]] constexpr bool PoseControlShapeValid(const PoseControl &control) {
   if (!PoseControlTypeValid(control.type) || control.reserved_0 != 0 ||
       control.reserved_1 != 0 || control.target_role < 1 ||
-      control.target_role > 100 || control.target_session == 0 ||
+      control.target_role > kMaximumRole || control.target_session == 0 ||
       control.group_mask == 0) {
     return false;
   }

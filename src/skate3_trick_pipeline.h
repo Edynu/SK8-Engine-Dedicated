@@ -1037,6 +1037,20 @@ void PublishCustomScorableIdAfterInputUpdate(uint8_t* base, uint32_t module,
 // Zero means ownership has not yet been resolved.
 uint32_t CurrentLocalPhysOut();
 
+// The local player's ScoreModule, or zero before ownership resolves. Read with
+// trick::ScoreModuleLayout offsets - kCollectorState says which collector is
+// live (trick::ScoreCollectorState), which is how "is the player grinding" is
+// answered without a single new hook.
+uint32_t CurrentLocalScoreModule();
+
+// How many times retail has answered "yes" to
+// PhysicalPlayerHiLOD::IsWipeoutRequested since startup. Polled several times
+// per frame while a wipeout is in progress, so the RATE matters rather than
+// the value: a rising count means the game currently wants the skater on the
+// floor. That is what separates a bail from deliberately stepping off the
+// board, which the off-board flag alone cannot tell apart.
+uint64_t CurrentLocalWipeoutRequests();
+
 // Read-only player-owned board position for native sandbox diagnostics.
 bool CurrentLocalBoardPosition(float out_position[3]);
 void ObserveGestureMappingMatch(PPCContext& ctx, uint8_t* base);

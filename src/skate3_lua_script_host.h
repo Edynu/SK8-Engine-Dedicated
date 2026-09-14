@@ -267,7 +267,8 @@ class LuaScriptHost {
 
   // Called by the client's console-command adapter when a user types a
   // registered command's name in the backtick console.
-  void InvokeCommand(const std::string& resource, int callback_ref,
+  void InvokeCommand(const std::string& resource, const std::string& command,
+                     int callback_ref,
                      std::string_view raw_args);
 
   // Runs a RegisterNUICallback handler in `resource`. `json_body` is the
@@ -290,8 +291,38 @@ class LuaScriptHost {
   // Tick's owner.
   void SweepStaleNuiCallbacks(std::int64_t timeout_ms);
 
+  // Calls a Lua function a resource registered earlier, by its registry ref.
+  //
+  // The general form of what InvokeCommand and InvokeNuiCallback each do for
+  // their own case, for natives that take a callback and call it back later -
+  // world markers being the first. `json_args` is encoded the same way event
+  // arguments are, so a handler receives real Lua values; `context` names the
+  // call in an error report ("marker 3").
+  //
+  // Runs the callback as a scheduler thread, so it may Skate.Wait - which for
+  // a marker matters: "teleport, wait, start a countdown" is the obvious thing
+  // to write in one. Returns false if the resource or ref is gone.
+  bool InvokeResourceCallback(const std::string& resource, int callback_ref,
+                              const std::string& json_args,
+                              const std::string& context);
+
+  // Frees a ref a native took with luaL_ref. Callers that hand out callbacks
+  // have to release them when whatever owned them goes away, or the ref (and
+  // the closure behind it) lives as long as the resource.
+  void ReleaseResourceCallback(const std::string& resource, int callback_ref);
+
   // Shared by every resource's print() override (see CreateResourceLuaState
   // in the .cpp) and the dev-console HTTP polling route.
+  // Reports a script failure to the dev console (and stderr) in one entry:
+  // what failed, where it was called from, and the traceback. `context` names
+  // the entry point, e.g. "command 'skategame'" or "event 'x' handler"; it is
+  // what turns "attempt to index a nil value" into something a script author
+  // can act on without guessing which of their handlers ran.
+  //
+  // Public because the scheduler's own error native reports through it.
+  void ReportScriptError(const std::string& resource, const std::string& context,
+                         const std::string& detail);
+
   ConsoleLogSink& log_sink() { return log_sink_; }
 
   // Per-resource CPU time and memory, rolled over once a second inside

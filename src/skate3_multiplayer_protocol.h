@@ -5,6 +5,21 @@
 
 namespace skate3::multiplayer::protocol {
 
+// Highest role a player may be assigned.
+//
+// Roles are NEVER REUSED - see RoleAllocator in skate3_dedicated_main.cpp. A
+// recycled id is worse than a wasted one: a client that had peer 7 on screen,
+// lost it, and then meets a different player who has also been given 7 has no
+// way to tell them apart, and every per-role cache (appearance, name, pose
+// baseline, smoothing state) silently belongs to the wrong person. So ids only
+// ever count upward, and this is the ceiling rather than a concurrent-player
+// limit: it bounds how many JOINS a single server session can serve, not how
+// many players can be connected at once.
+//
+// 16000 fits the v12 envelope's 16-bit sender_role with room to spare, so
+// raising it from the original 100 cost nothing on the wire.
+inline constexpr std::uint32_t kMaximumRole = 16000;
+
 inline constexpr std::uint32_t kPacketMagic = 0x504D334Bu;  // "K3MP"
 inline constexpr std::uint32_t kAnimationPacketMagic =
     0x414D334Bu;  // "K3MA"
@@ -222,8 +237,8 @@ struct ControlPacket {
   if (packet.magic != kControlPacketMagic ||
       packet.version != kProtocolVersion ||
       packet.byte_count != sizeof(ControlPacket) ||
-      packet.sender_role < 1 || packet.sender_role > 100 ||
-      packet.target_role < 1 || packet.target_role > 100 ||
+      packet.sender_role < 1 || packet.sender_role > kMaximumRole ||
+      packet.target_role < 1 || packet.target_role > kMaximumRole ||
       packet.sender_role == packet.target_role ||
       (packet.capabilities & kCapabilityControlV1) == 0) {
     return false;

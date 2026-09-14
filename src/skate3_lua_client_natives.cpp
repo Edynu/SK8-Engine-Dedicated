@@ -20,11 +20,18 @@
 #include <skate/world/skate_object_package.h>
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_prop_service.h"
+#include "skate3_retail_bail.h"
+#include "skate3_retail_grind.h"
+#include "skate3_retail_markers.h"
+#include "generated/skate3_marker_icons.h"
+#include "skate3_world_markers.h"
+#include "skate3_retail_score.h"
 #include "skate3_trick_pipeline.h"
 
 #include <httplib.h>
 #include <lua.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -610,6 +617,363 @@ int Lua_CallFlashMethod(lua_State* L) {
   lua_pushboolean(L, true);
   lua_pushfstring(L, "queued method %d with %d argument(s)", (int)method_id,
                   count);
+  return 2;
+}
+
+// GetSkaterScore() -> table or nil
+//
+// nil while retail has no live score block - in the front end, mid-load, or
+// before the player has spawned - which is a normal state, not an error, so a
+// caller should treat nil as "not skating yet" rather than as a failure.
+//
+// One table rather than a native per field on purpose: the multiplier and the
+// sequence score have to come from the same instant, or a mode can sample them
+// either side of a landing and score a trick at the wrong multiplier. See
+// skate3_retail_score.h for why these are read from memory instead of calling
+// retail's own getters.
+int Lua_GetSkaterScore(lua_State* L) {
+  const auto snapshot = retail_score::Read();
+  if (!snapshot.valid) {
+    lua_pushnil(L);
+    return 1;
+  }
+  lua_newtable(L);
+  lua_pushnumber(L, snapshot.multiplier);
+  lua_setfield(L, -2, "multiplier");
+  lua_pushinteger(L, static_cast<lua_Integer>(snapshot.sequence_score));
+  lua_setfield(L, -2, "sequence");
+  lua_pushinteger(L, static_cast<lua_Integer>(snapshot.momentum_score));
+  lua_setfield(L, -2, "momentum");
+  lua_pushinteger(L, static_cast<lua_Integer>(snapshot.line_score));
+  lua_setfield(L, -2, "line");
+  return 1;
+}
+
+// GetSkaterScoreBlock() -> "0x........" or nil
+//
+// The raw block address, for probing with ReadGuestU32 when one of the four
+// fields above turns out to be the wrong one. The block holds more than the
+// front end happens to ask for, and this is how the rest gets found without a
+// rebuild.
+int Lua_GetSkaterScoreBlock(lua_State* L) {
+  const std::uint32_t block = retail_score::BlockAddress();
+  if (block == 0) {
+    lua_pushnil(L);
+    return 1;
+  }
+  char text[16];
+  std::snprintf(text, sizeof(text), "0x%08X", block);
+  lua_pushstring(L, text);
+  return 1;
+}
+
+// IsSessionMarkerActive() -> bool or nil
+//
+// nil when retail has no marker block yet (front end, mid-load). See
+// skate3_retail_markers.h: retail has exactly ONE session marker, and this is
+// the single byte that says whether it is placed.
+int Lua_IsSessionMarkerActive(lua_State* L) {
+  const auto state = retail_markers::ReadSessionMarker();
+  if (!state.valid) {
+    lua_pushnil(L);
+    return 1;
+  }
+  lua_pushboolean(L, state.active ? 1 : 0);
+  return 1;
+}
+
+// GetSessionMarkerBlock() -> "0x........" or nil
+//
+// For finding the marker's position fields: dump this block with ReadGuestU32
+// while standing somewhere known and look for the coordinates. Static reading
+// cannot get there - SetSessionMarker takes no position argument - so this is
+// the intended next experiment.
+int Lua_GetSessionMarkerBlock(lua_State* L) {
+  const std::uint32_t block = retail_markers::BlockAddress();
+  if (block == 0) {
+    lua_pushnil(L);
+    return 1;
+  }
+  char text[16];
+  std::snprintf(text, sizeof(text), "0x%08X", block);
+  lua_pushstring(L, text);
+  return 1;
+}
+
+// --- World markers ---------------------------------------------------
+//
+// Real in-world markers: this module owns identity and the callback, the
+// activation logic lives in skate3_world_markers.cpp, and the native renderer
+// draws them as billboards. See skate3_world_markers.h for why retail's own
+// marker could not be used.
+
+// marker_id -> (resource, callback ref), so an activation can be routed back
+// to the function the script passed. Held here rather than in world_markers
+// because that module deliberately knows nothing about Lua.
+struct MarkerCallback {
+  std::string resource;
+  int callback_ref = LUA_NOREF;
+};
+std::mutex g_marker_callbacks_mutex;
+std::unordered_map<std::uint32_t, MarkerCallback> g_marker_callbacks;
+
+void ReleaseMarkerCallback(std::uint32_t id) {
+  MarkerCallback entry;
+  {
+    std::lock_guard<std::mutex> lock(g_marker_callbacks_mutex);
+    const auto it = g_marker_callbacks.find(id);
+    if (it == g_marker_callbacks.end()) {
+      return;
+    }
+    entry = it->second;
+    g_marker_callbacks.erase(it);
+  }
+  if (entry.callback_ref != LUA_NOREF && g_host) {
+    g_host->ReleaseResourceCallback(entry.resource, entry.callback_ref);
+  }
+}
+
+// CreateMarker{x=,y=,z=, radius=, size=, color=, hold=, text=, onUse=fn} -> id
+//
+// A table rather than positional arguments: there are eight fields, most have
+// a sensible default, and a call site reading CreateMarker(1,2,3,4,5,6) tells
+// nobody anything.
+int Lua_CreateMarker(lua_State* L) {
+  const std::string resource = lua_tostring(L, lua_upvalueindex(2));
+  luaL_checktype(L, 1, LUA_TTABLE);
+
+  world_markers::MarkerDesc desc;
+  const auto number_field = [L](const char* name, float fallback) {
+    lua_getfield(L, 1, name);
+    const float value = lua_isnumber(L, -1)
+                            ? static_cast<float>(lua_tonumber(L, -1))
+                            : fallback;
+    lua_pop(L, 1);
+    return value;
+  };
+  desc.x = number_field("x", 0.0f);
+  desc.y = number_field("y", 0.0f);
+  desc.z = number_field("z", 0.0f);
+  desc.radius = number_field("radius", 3.0f);
+  desc.size = number_field("size", 1.0f);
+  desc.hold_ms = static_cast<std::uint32_t>(
+      std::max(0.0f, number_field("hold", 500.0f)));
+  // Read as an INTEGER, not through number_field: 0xFFFFFFFF is not
+  // representable as a float - it rounds up to 4294967296, which truncates to
+  // 0, and every marker that did not name a colour came out fully transparent.
+  lua_getfield(L, 1, "color");
+  desc.color = lua_isnumber(L, -1)
+                   ? static_cast<std::uint32_t>(lua_tointeger(L, -1) &
+                                                0xFFFFFFFFll)
+                   : 0xFFFFFFFFu;
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "text");
+  if (lua_isstring(L, -1)) {
+    desc.text = lua_tostring(L, -1);
+  }
+  lua_pop(L, 1);
+
+  // Retail art, baked into the exe by tools/extract_rw4_icons.py. Named rather
+  // than numbered so a script says what it wants; an unknown name draws the
+  // built-in ring, so a typo is visibly wrong art rather than a missing marker.
+  lua_getfield(L, 1, "texture");
+  if (lua_isstring(L, -1)) {
+    desc.texture = lua_tostring(L, -1);
+  }
+  lua_pop(L, 1);
+
+  int callback_ref = LUA_NOREF;
+  lua_getfield(L, 1, "onUse");
+  if (lua_isfunction(L, -1)) {
+    callback_ref = luaL_ref(L, LUA_REGISTRYINDEX);  // pops the function
+  } else {
+    lua_pop(L, 1);
+  }
+
+  const std::uint32_t id = world_markers::Create(desc, resource);
+  if (id == 0) {
+    if (callback_ref != LUA_NOREF) {
+      luaL_unref(L, LUA_REGISTRYINDEX, callback_ref);
+    }
+    lua_pushnil(L);
+    return 1;
+  }
+  if (callback_ref != LUA_NOREF) {
+    std::lock_guard<std::mutex> lock(g_marker_callbacks_mutex);
+    g_marker_callbacks.emplace(id, MarkerCallback{resource, callback_ref});
+  }
+  lua_pushinteger(L, static_cast<lua_Integer>(id));
+  return 1;
+}
+
+int Lua_DestroyMarker(lua_State* L) {
+  const auto id = static_cast<std::uint32_t>(luaL_checkinteger(L, 1));
+  const bool removed = world_markers::Destroy(id);
+  ReleaseMarkerCallback(id);
+  lua_pushboolean(L, removed ? 1 : 0);
+  return 1;
+}
+
+int Lua_SetMarkerText(lua_State* L) {
+  const auto id = static_cast<std::uint32_t>(luaL_checkinteger(L, 1));
+  lua_pushboolean(
+      L, world_markers::SetText(id, luaL_checkstring(L, 2)) ? 1 : 0);
+  return 1;
+}
+
+int Lua_SetMarkerPosition(lua_State* L) {
+  const auto id = static_cast<std::uint32_t>(luaL_checkinteger(L, 1));
+  const float x = static_cast<float>(luaL_checknumber(L, 2));
+  const float y = static_cast<float>(luaL_checknumber(L, 3));
+  const float z = static_cast<float>(luaL_checknumber(L, 4));
+  lua_pushboolean(L, world_markers::SetPosition(id, x, y, z) ? 1 : 0);
+  return 1;
+}
+
+// GetMarkerTextures() -> { "challenge0", ... }
+//
+// The retail icons baked into the exe. Exposed so a script can discover what
+// it may pass as CreateMarker's `texture` without the names being written down
+// in two places and drifting.
+int Lua_GetMarkerTextures(lua_State* L) {
+  lua_newtable(L);
+  int index = 0;
+  for (const marker_icons::Icon& icon : marker_icons::kIcons) {
+    lua_pushstring(L, icon.name);
+    lua_rawseti(L, -2, ++index);
+  }
+  return 1;
+}
+
+// --- Single-value accessors -------------------------------------------
+//
+// Thin wrappers over the snapshot natives below, for the common case of
+// wanting one number without unpacking a table.
+//
+// The tables are kept, and are still the right choice when two fields have to
+// agree: each of these takes its own snapshot, so reading the multiplier and
+// the sequence score through two calls can straddle a landing and pair a score
+// with the wrong multiplier. One call, one table, when that matters.
+//
+// There is deliberately NO off-board predicate here. IsOffBoard() already
+// answers that, from the board state rather than the score collector, and two
+// natives answering the same question from different sources is how they end
+// up disagreeing. What is new is whether it was a CRASH, which is below.
+
+int Lua_IsSkaterBailed(lua_State* L) {
+  lua_pushboolean(L, retail_bail::Current().bailed ? 1 : 0);
+  return 1;
+}
+
+int Lua_GetSkaterBailDuration(lua_State* L) {
+  lua_pushinteger(L,
+                  static_cast<lua_Integer>(retail_bail::Current().duration_ms));
+  return 1;
+}
+
+// Zero when there is no live score block (front end, loading, not spawned) -
+// the same state GetSkaterScore reports as nil. A scalar has nowhere to put
+// "unknown", so a mode that needs to tell those apart wants the table.
+int Lua_GetSkaterSequenceScore(lua_State* L) {
+  lua_pushinteger(L, static_cast<lua_Integer>(retail_score::Read().sequence_score));
+  return 1;
+}
+
+int Lua_GetSkaterScoreMultiplier(lua_State* L) {
+  lua_pushnumber(L, retail_score::Read().multiplier);
+  return 1;
+}
+
+int Lua_GetSkaterMomentumScore(lua_State* L) {
+  lua_pushinteger(L, static_cast<lua_Integer>(retail_score::Read().momentum_score));
+  return 1;
+}
+
+int Lua_GetSkaterLineScore(lua_State* L) {
+  lua_pushinteger(L, static_cast<lua_Integer>(retail_score::Read().line_score));
+  return 1;
+}
+
+// Zero when not grinding, which is also what they read the instant a grind
+// ends - listen for skate3:grindEnded to catch the final length.
+int Lua_GetSkaterGrindDistance(lua_State* L) {
+  lua_pushnumber(L, retail_grind::Current().distance);
+  return 1;
+}
+
+int Lua_GetSkaterGrindDuration(lua_State* L) {
+  lua_pushinteger(L,
+                  static_cast<lua_Integer>(retail_grind::Current().duration_ms));
+  return 1;
+}
+
+int Lua_GetSkaterGrindReward(lua_State* L) {
+  lua_pushnumber(L, retail_grind::Current().reward);
+  return 1;
+}
+
+// GetSkaterBail() -> {offBoard, bailed, duration}
+//
+// Always a table: "on the board" is a real answer, not an absence, so a caller
+// can read .offBoard without a nil check. `bailed` separates a crash from
+// stepping off deliberately - see skate3_retail_bail.h for how those are told
+// apart, because IsOffBoard alone cannot.
+int Lua_GetSkaterBail(lua_State* L) {
+  const retail_bail::State state = retail_bail::Current();
+  lua_newtable(L);
+  lua_pushboolean(L, state.off_board ? 1 : 0);
+  lua_setfield(L, -2, "offBoard");
+  lua_pushboolean(L, state.bailed ? 1 : 0);
+  lua_setfield(L, -2, "bailed");
+  lua_pushinteger(L, static_cast<lua_Integer>(state.duration_ms));
+  lua_setfield(L, -2, "duration");
+  return 1;
+}
+
+// GetSkaterGrind() -> table or nil
+//
+// nil when the player is not grinding. `duration` (ms) and `distance` (world
+// units) are measured here rather than read from retail, which has no such
+// fields - distance is integrated per frame, so a grind round a curved rail
+// measures the rail rather than the straight line between its ends. `reward`
+// IS retail's own accumulating grind score, so it agrees with what the game
+// scored.
+int Lua_GetSkaterGrind(lua_State* L) {
+  const retail_grind::Grind grind = retail_grind::Current();
+  if (!grind.active) {
+    lua_pushnil(L);
+    return 1;
+  }
+  lua_newtable(L);
+  lua_pushinteger(L, static_cast<lua_Integer>(grind.duration_ms));
+  lua_setfield(L, -2, "duration");
+  lua_pushnumber(L, grind.distance);
+  lua_setfield(L, -2, "distance");
+  lua_pushnumber(L, grind.reward);
+  lua_setfield(L, -2, "reward");
+  return 1;
+}
+
+// IsSkaterGrinding() -> boolean
+int Lua_IsSkaterGrinding(lua_State* L) {
+  lua_pushboolean(L, retail_grind::Current().active ? 1 : 0);
+  return 1;
+}
+
+// GetActiveMarker() -> id, progress  (nil when the player is not at one)
+//
+// Exposed alongside the callback because a mode often wants to show its own UI
+// while the player stands there, which needs the state every frame rather than
+// only the moment it completes.
+int Lua_GetActiveMarker(lua_State* L) {
+  const std::uint32_t id = world_markers::ActiveMarker();
+  if (id == 0) {
+    lua_pushnil(L);
+    return 1;
+  }
+  lua_pushinteger(L, static_cast<lua_Integer>(id));
+  lua_pushnumber(L, world_markers::HoldProgress());
   return 2;
 }
 
@@ -1486,8 +1850,9 @@ void OnCommandRegistered(const std::string& resource, const std::string& command
   entry.description = "Lua command registered by resource '" + resource + "'";
   entry.setter = [](std::string_view) { return false; };
   entry.getter = []() { return std::string("<command>"); };
-  entry.command_callback = [host, resource, callback_ref](std::string_view args) {
-    host->InvokeCommand(resource, callback_ref, args);
+  entry.command_callback = [host, resource, command,
+                            callback_ref](std::string_view args) {
+    host->InvokeCommand(resource, command, callback_ref, args);
   };
   entry.lifecycle = rex::cvar::Lifecycle::kHotReload;
   entry.default_value = "<command>";
@@ -1971,6 +2336,48 @@ void Initialize() {
   g_host->RegisterNative("IsAirOffBoard", &Lua_IsAirOffBoard);
   g_host->RegisterNative("IsSkaterInAir", &Lua_IsSkaterInAir);
   g_host->RegisterNative("IsSkaterOnGround", &Lua_IsSkaterOnGround);
+  // Resource-aware: CreateMarker has to know who to route an activation back
+  // to, and who to clean up after on a restart.
+  g_host->RegisterResourceNative("CreateMarker", &Lua_CreateMarker);
+  g_host->RegisterNative("DestroyMarker", &Lua_DestroyMarker);
+  g_host->RegisterNative("SetMarkerText", &Lua_SetMarkerText);
+  g_host->RegisterNative("SetMarkerPosition", &Lua_SetMarkerPosition);
+  g_host->RegisterNative("GetActiveMarker", &Lua_GetActiveMarker);
+  g_host->RegisterNative("GetMarkerTextures", &Lua_GetMarkerTextures);
+  // Routes a completed hold to the script that created the marker.
+  world_markers::SetActivationHandler([](std::uint32_t id) {
+    MarkerCallback entry;
+    {
+      std::lock_guard<std::mutex> lock(g_marker_callbacks_mutex);
+      const auto it = g_marker_callbacks.find(id);
+      if (it == g_marker_callbacks.end()) {
+        return;  // a marker with no onUse; GetActiveMarker still sees it.
+      }
+      entry = it->second;
+    }
+    if (g_host != nullptr) {
+      g_host->InvokeResourceCallback(entry.resource, entry.callback_ref,
+                                     "[" + std::to_string(id) + "]",
+                                     "marker " + std::to_string(id));
+    }
+  });
+  g_host->RegisterNative("IsSessionMarkerActive", &Lua_IsSessionMarkerActive);
+  g_host->RegisterNative("GetSessionMarkerBlock", &Lua_GetSessionMarkerBlock);
+  g_host->RegisterNative("GetSkaterBail", &Lua_GetSkaterBail);
+  g_host->RegisterNative("IsSkaterBailed", &Lua_IsSkaterBailed);
+  g_host->RegisterNative("GetSkaterBailDuration", &Lua_GetSkaterBailDuration);
+  g_host->RegisterNative("GetSkaterSequenceScore", &Lua_GetSkaterSequenceScore);
+  g_host->RegisterNative("GetSkaterScoreMultiplier",
+                         &Lua_GetSkaterScoreMultiplier);
+  g_host->RegisterNative("GetSkaterMomentumScore", &Lua_GetSkaterMomentumScore);
+  g_host->RegisterNative("GetSkaterLineScore", &Lua_GetSkaterLineScore);
+  g_host->RegisterNative("GetSkaterGrindDistance", &Lua_GetSkaterGrindDistance);
+  g_host->RegisterNative("GetSkaterGrindDuration", &Lua_GetSkaterGrindDuration);
+  g_host->RegisterNative("GetSkaterGrindReward", &Lua_GetSkaterGrindReward);
+  g_host->RegisterNative("GetSkaterGrind", &Lua_GetSkaterGrind);
+  g_host->RegisterNative("IsSkaterGrinding", &Lua_IsSkaterGrinding);
+  g_host->RegisterNative("GetSkaterScore", &Lua_GetSkaterScore);
+  g_host->RegisterNative("GetSkaterScoreBlock", &Lua_GetSkaterScoreBlock);
   g_host->RegisterNative("GetTrickName", &Lua_GetTrickName);
   g_host->RegisterNative("GetTrickPatternClass", &Lua_GetTrickPatternClass);
   g_host->RegisterNative("WorldToScreen", &Lua_WorldToScreen);
@@ -2142,6 +2549,49 @@ void PublishTrickEvents() {
   }
 }
 
+// Grinds that finished since the last frame. Drained rather than polled so a
+// grind that started and ended between two script frames is still reported -
+// the same reason trick events are queued.
+void PublishGrindEvents() {
+  for (const retail_grind::Completed& grind : retail_grind::TakeCompleted()) {
+    char distance_text[32];
+    char reward_text[32];
+    std::snprintf(distance_text, sizeof(distance_text), "%.4f",
+                  static_cast<double>(grind.distance));
+    std::snprintf(reward_text, sizeof(reward_text), "%.6g",
+                  static_cast<double>(grind.reward));
+    std::ostringstream args;
+    args << "[{\"duration\":" << grind.duration_ms << ",\"distance\":"
+         << distance_text << ",\"reward\":" << reward_text << "}]";
+    g_host->DispatchLocalEvent("skate3:grindEnded", args.str());
+  }
+}
+
+// Bail / recovery edges. Drained rather than polled, so a bail that starts and
+// ends between two script frames is still reported.
+void PublishBailEvents() {
+  for (const retail_bail::Event& event : retail_bail::TakeEvents()) {
+    const char* name = nullptr;
+    switch (event.kind) {
+      case retail_bail::EventKind::kBailed:
+        name = "skate3:bailed";
+        break;
+      case retail_bail::EventKind::kSteppedOff:
+        name = "skate3:steppedOff";
+        break;
+      case retail_bail::EventKind::kRecovered:
+        name = "skate3:recovered";
+        break;
+    }
+    if (name == nullptr) {
+      continue;
+    }
+    std::ostringstream args;
+    args << "[{\"duration\":" << event.duration_ms << "}]";
+    g_host->DispatchLocalEvent(name, args.str());
+  }
+}
+
 // Streams world props: tells the service where the player is, then spawns
 // whatever the server said is nearby.
 //
@@ -2176,8 +2626,16 @@ void Tick() {
     // Before anything runs, so every script in this tick sees the same
     // press/release edges - see skate3_input_state.h.
     input_state::BeginScriptFrame();
+    // After BeginScriptFrame so the hold sees this frame's button state, and
+    // before g_host->Tick() so a marker activated now runs its callback in the
+    // same frame rather than the next one.
+    world_markers::Update();
+    retail_grind::Update();
+    retail_bail::Update();
     ServiceStreamedProps();
     PublishTrickEvents();
+    PublishGrindEvents();
+    PublishBailEvents();
     g_host->Tick();
     // A handler that took `cb` and never called it would otherwise leave
     // the page's fetch() pending forever. Swept here rather than on a timer

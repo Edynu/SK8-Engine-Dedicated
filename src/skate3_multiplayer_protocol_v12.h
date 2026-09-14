@@ -1,11 +1,20 @@
 #pragma once
 
+#include "skate3_multiplayer_protocol.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <span>
 
 namespace skate3::multiplayer::protocol_v12 {
+
+// Shared with the legacy protocol so the two cannot drift - a role valid on
+// one wire format and rejected on the other is a silent, one-sided failure.
+inline constexpr std::uint16_t kMaximumRole =
+    static_cast<std::uint16_t>(protocol::kMaximumRole);
+static_assert(protocol::kMaximumRole <= 0xFFFFu,
+              "sender_role is 16 bits in the v12 envelope");
 
 inline constexpr std::uint32_t kEnvelopeMagic = 0x324D334Bu; // "K3M2"
 inline constexpr std::uint16_t kProtocolVersion = 12;
@@ -97,7 +106,7 @@ struct Capabilities {
          (envelope.flags & ~kKnownEnvelopeFlags) == 0 &&
          envelope.header_bytes == kEnvelopeBytes &&
          envelope.payload_bytes <= kMaximumPayloadBytes &&
-         envelope.sender_role >= 1 && envelope.sender_role <= 100 &&
+         envelope.sender_role >= 1 && envelope.sender_role <= kMaximumRole &&
          envelope.sender_session != 0;
 }
 
@@ -437,7 +446,7 @@ RelayRegisterAckShapeValid(const RelayRegisterAck &ack) {
   if (ack.status != RelayRegisterStatus::kOk) {
     return true;
   }
-  return ack.assigned_role >= 1 && ack.assigned_role <= 100 &&
+  return ack.assigned_role >= 1 && ack.assigned_role <= kMaximumRole &&
          ack.assigned_session != 0;
 }
 

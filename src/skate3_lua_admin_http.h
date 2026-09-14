@@ -139,6 +139,21 @@ class AdminHttpServer {
                              AppearanceFetchHandler fetch,
                              AppearanceRosterProvider roster);
 
+  // Points one role at the appearance another role is already wearing, without
+  // transferring any bytes - the store is content-hash keyed, so this is a
+  // rebind, not a copy.
+  //
+  // Exists for the load-test harness: its virtual players replay a recorded
+  // UDP stream and never upload an appearance, so without this they render as
+  // nothing and a crowd test measures a crowd of invisible people. Pointing
+  // them all at a real client's outfit makes them draw.
+  //
+  // Deliberately NOT how real clients get dressed - they upload their own.
+  // Returns false if the source role has no appearance stored.
+  using AppearanceCloneHandler =
+      std::function<bool(std::uint32_t from_role, std::uint32_t to_role)>;
+  void SetAppearanceCloneHandler(AppearanceCloneHandler clone);
+
   // Serves the networked prop store (skate3_prop_store.h), which lives in
   // relay code this class does not link.
   //

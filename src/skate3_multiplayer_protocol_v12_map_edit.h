@@ -107,7 +107,7 @@ struct MapEditSpawnHeader {
 [[nodiscard]] inline bool
 MapEditControlShapeValid(const MapEditControl &control) {
   if (!MapEditControlTypeValid(control.type) || control.source_role < 1 ||
-      control.source_role > 100) {
+      control.source_role > kMaximumRole) {
     return false;
   }
   if (control.type == MapEditControlType::kSnapshotBegin ||
@@ -231,7 +231,7 @@ MapEditContentHash(std::span<const std::uint8_t> bytes) {
 [[nodiscard]] inline bool
 MapEditSpawnHeaderShapeValid(const MapEditSpawnHeader &header) {
   return MapEditSpawnTypeValid(header.type) && header.source_role >= 1 &&
-         header.source_role <= 100 && header.request_id != 0 &&
+         header.source_role <= kMaximumRole && header.request_id != 0 &&
          header.total_bytes != 0 &&
          header.total_bytes <= kMaximumMapEditPackageBytes &&
          header.fragment_count ==

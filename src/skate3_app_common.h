@@ -17,7 +17,6 @@
 #include "skate3_nui_dialog.h"
 #include "skate3_input_sampler.h"
 #include "skate3_native_debug_dialog.h"
-#include "skate3_player_nameplates.h"
 #include "skate3_map_editor_spawn_dialog.h"
 #include "skate3_release_updater.h"
 #include "skate3_vanilla_ui/skate3_vanilla_ui_dialog.h"
@@ -72,7 +71,6 @@ class Skate3BaseApp : public rex::ReXApp {
   std::unique_ptr<skate3::ReleaseUpdater> release_updater_;
   std::unique_ptr<skate3::NativeDebugDialog> native_debug_dialog_;
   std::unique_ptr<skate3::RenderModeIndicator> render_mode_indicator_;
-  std::unique_ptr<skate3::PlayerNameplateOverlay> player_nameplate_overlay_;
   std::unique_ptr<skate3::MapEditorSpawnDialog>
       map_editor_spawn_dialog_;
   std::unique_ptr<skate3::Skate3DevConsoleDialog> dev_console_dialog_;

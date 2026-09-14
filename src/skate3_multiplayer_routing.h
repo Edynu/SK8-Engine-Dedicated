@@ -288,7 +288,8 @@ struct CrowdPolicy {
 class VisualRelayRouter {
  public:
   [[nodiscard]] bool Register(RelayPeer peer) {
-    if (peer.connection_id == 0 || peer.role < 1 || peer.role > 100 ||
+    if (peer.connection_id == 0 || peer.role < 1 ||
+        peer.role > protocol_v12::kMaximumRole ||
         peer.session == 0) {
       return false;
     }

@@ -263,6 +263,24 @@ REXCVAR_DEFINE_BOOL(
     "session is active. Routes realtime traffic to the configured relay "
     "address instead of the same-PC loopback transport or Steam.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+// Load testing. A real client is the only thing that can produce a genuine
+// animation stream - the encoder needs the game's skeleton - so the way to get
+// 32 plausible clients onto a server is to record ONE and replay it. This is
+// the recording half; tools/loadtest replays it.
+//
+// Every outbound datagram is written verbatim with its send time. Verbatim
+// matters: the relay derives a player's role from the CONNECTION, never from
+// the bytes ("a client may claim any role it likes in bytes it wrote itself"),
+// so a replayer needs no rewriting inside the payload - a fresh socket is a
+// fresh player.
+REXCVAR_DEFINE_STRING(
+    skate3_multiplayer_capture_outbound, "", "Skate 3/Multiplayer",
+    "Path to record every outbound multiplayer datagram to, for replay by the "
+    "load-test tool. Empty means off. Records verbatim bytes plus send times; "
+    "the file grows at roughly the client's uplink rate, so turn it off after "
+    "capturing the manoeuvre you want repeated.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_STRING(
     skate3_multiplayer_relay_address, "", "Skate 3",
     "Resolved host:port of the connected dedicated relay. Empty when no "
@@ -5583,9 +5601,51 @@ private:
   }
 
 #if defined(_WIN32)
+  // Appends one datagram to the capture file when the cvar names one.
+  //
+  // Opened lazily and kept open: this runs per packet at the client's full
+  // send rate, and reopening per write would dominate the cost of the thing
+  // being measured. Failures are silent after the first - a load-test capture
+  // is not worth a log line per packet.
+  void CaptureOutbound(const void *bytes, int byte_count) {
+    const std::string path(REXCVAR_GET(skate3_multiplayer_capture_outbound));
+    if (path.empty()) {
+      if (capture_file_ != nullptr) {
+        std::fclose(capture_file_);
+        capture_file_ = nullptr;
+        capture_path_.clear();
+      }
+      return;
+    }
+    if (path != capture_path_) {
+      if (capture_file_ != nullptr) {
+        std::fclose(capture_file_);
+      }
+      capture_file_ = std::fopen(path.c_str(), "wb");
+      capture_path_ = path;
+      if (capture_file_ != nullptr) {
+        // "SK8CAP01": lets the replayer refuse a file that is not one of
+        // these rather than spraying arbitrary bytes at a server.
+        std::fwrite("SK8CAP01", 1, 8, capture_file_);
+        REXLOG_INFO("multiplayer: capturing outbound packets to {}", path);
+      } else {
+        REXLOG_WARN("multiplayer: could not open capture file {}", path);
+      }
+    }
+    if (capture_file_ == nullptr || byte_count <= 0) {
+      return;
+    }
+    const std::uint64_t now_us = NowMicroseconds();
+    const std::uint32_t length = static_cast<std::uint32_t>(byte_count);
+    std::fwrite(&now_us, sizeof(now_us), 1, capture_file_);
+    std::fwrite(&length, sizeof(length), 1, capture_file_);
+    std::fwrite(bytes, 1, length, capture_file_);
+  }
+
   bool SendBytes(const void *bytes, int byte_count,
                  const PacketEndpoint &target,
                  OutboundTrafficClass traffic_class, bool relayed) {
+    CaptureOutbound(bytes, byte_count);
     const bool reliable = OutboundTrafficReliable(traffic_class);
     bool success = false;
     if (target.kind == TransportKind::kSteamMessages) {
@@ -7642,6 +7702,9 @@ private:
   std::mutex mutex_;
 #if defined(_WIN32)
   SOCKET socket_ = INVALID_SOCKET;
+  // Outbound packet capture for load testing - see CaptureOutbound.
+  std::FILE *capture_file_ = nullptr;
+  std::string capture_path_;
   bool winsock_started_ = false;
   bool using_steam_ = false;
   std::uint64_t steam_lobby_id_ = 0;

@@ -971,6 +971,28 @@ REXCVAR_DEFINE_STRING(skate3_native_render_scene_trace_mesh, "", "Skate 3",
                       "every worker commit touching the mesh's objects. "
                       "Empty = off.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+// Finding retail's own marker art. The icons are APT assets packed in .rx2 and
+// are NOT extractable offline in any reasonable way - but every texture retail
+// draws is already captured into the 2D texture store, so the icon exists as a
+// native GPU texture the moment the game has drawn it once. These two cvars are
+// the identify-then-use loop for it: turn the inventory on, stand at a retail
+// challenge marker, read the small textures out of the log, then set the key.
+REXCVAR_DEFINE_BOOL(
+    skate3_native_render_scene_ui_tex_log, false, "Skate 3",
+    "Log every NEW 2D overlay texture once, with its store key and size "
+    "('ui-tex:' log lines). Used to identify retail's own marker/HUD art so "
+    "skate3_marker_icon_key can point at it; icons are small, so filter the "
+    "log by size rather than reading all of it.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_STRING(
+    skate3_marker_icon_key, "", "Skate 3/Multiplayer",
+    "Hex store key (as printed by skate3_native_render_scene_ui_tex_log) of a "
+    "captured retail texture to draw on in-world markers instead of the "
+    "built-in ring. Empty, or a key the game has not drawn this session, falls "
+    "back to the ring - so a wrong key degrades rather than showing nothing.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_STRING(skate3_native_render_scene_trace_2d, "", "Skate 3",
                       "Hex fetch word 1 (base|flags) of a 2D overlay texture "
                       "to trace through the 2D resolver ('2d-trace:' log "

@@ -20,7 +20,7 @@ inline constexpr auto kAppearanceResendRequestMinimumInterval =
 // retire each other's texture-store entry.
 [[nodiscard]] constexpr std::uint64_t RemoteAppearanceTextureStoreKey(
     std::uint32_t role, std::uint64_t content_key) {
-  if (role < 1 || role > 100 || content_key == 0) {
+  if (role < 1 || role > protocol::kMaximumRole || content_key == 0) {
     return 0;
   }
   constexpr std::uint64_t kFnvPrime = 1099511628211ull;
@@ -46,7 +46,7 @@ inline constexpr auto kAppearanceResendRequestMinimumInterval =
 
 [[nodiscard]] constexpr std::uint32_t RemoteAppearanceMeshKey(
     std::uint8_t slot, std::uint32_t role, std::size_t piece_index) {
-  if (slot > 1 || role < 1 || role > 100 ||
+  if (slot > 1 || role < 1 || role > protocol::kMaximumRole ||
       piece_index > 0xFFFFu) {
     return 0;
   }
@@ -59,7 +59,7 @@ inline constexpr auto kAppearanceResendRequestMinimumInterval =
 [[nodiscard]] constexpr std::uint32_t
 RemoteAppearanceTextureObjectKey(std::uint8_t slot, std::uint32_t role,
                                  std::size_t texture_index) {
-  if (slot > 1 || role < 1 || role > 100 ||
+  if (slot > 1 || role < 1 || role > protocol::kMaximumRole ||
       texture_index > 0xFFFFu) {
     return 0;
   }
@@ -121,8 +121,8 @@ AppearanceAssemblyExpired(typename Clock::time_point now,
 [[nodiscard]] constexpr std::uint32_t AppearanceResendTargetRole(
     std::uint32_t local_role, bool using_steam,
     std::uint32_t requester_role) {
-  if (local_role < 1 || local_role > 100 ||
-      requester_role < 1 || requester_role > 100 ||
+  if (local_role < 1 || local_role > protocol::kMaximumRole ||
+      requester_role < 1 || requester_role > protocol::kMaximumRole ||
       local_role == requester_role) {
     return 0;
   }
@@ -138,8 +138,8 @@ LocalhostAppearanceFanoutRestartTarget(
     std::uint32_t local_role, bool using_steam,
     std::uint32_t observed_role, bool capabilities_changed,
     std::uint64_t local_appearance_identity) {
-  if (using_steam || local_role <= 1 || local_role > 100 ||
-      observed_role <= 1 || observed_role > 100 ||
+  if (using_steam || local_role <= 1 || local_role > protocol::kMaximumRole ||
+      observed_role <= 1 || observed_role > protocol::kMaximumRole ||
       observed_role == local_role || !capabilities_changed ||
       local_appearance_identity == 0) {
     return 0;
@@ -222,7 +222,7 @@ private:
   };
 
   [[nodiscard]] static constexpr bool ValidRole(std::uint32_t role) {
-    return role >= 1 && role <= 100;
+    return role >= 1 && role <= protocol::kMaximumRole;
   }
 
   std::unordered_map<std::uint32_t, PeerGeneration> peers_;

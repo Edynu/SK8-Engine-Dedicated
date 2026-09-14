@@ -68,6 +68,10 @@
 #endif
 #include "skate3_lua_client_natives.h"
 #include "skate3_mechanics_sandbox.h"
+#include "generated/skate3_marker_icons.h"
+#include "skate3_player_nameplates.h"
+#include "skate3_text_texture.h"
+#include "skate3_world_markers.h"
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_multiplayer.h"
 #include "skate3_multiplayer_assets.h"
@@ -198,6 +202,8 @@ REXCVAR_DECLARE(int32_t, skate3_native_render_scene_warmup_budget_ms);
 REXCVAR_DECLARE(int32_t, skate3_native_render_scene_warmup_min_items);
 REXCVAR_DECLARE(std::string, skate3_native_render_scene_trace_mesh);
 REXCVAR_DECLARE(std::string, skate3_native_render_scene_trace_2d);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_ui_tex_log);
+REXCVAR_DECLARE(std::string, skate3_marker_icon_key);
 REXCVAR_DECLARE(std::string, skate3_native_render_snapshot_dir);
 
 #if (defined(REX_HAS_D3D12) && REX_HAS_D3D12) || \
@@ -3999,6 +4005,298 @@ bool Ensure2dPso(const NativeGuestOutputRenderContext& context) {
 }
 
 // In-world spline pipelines (darken + additive default).
+// Marker / nameplate billboard pipelines. Modelled on EnsureSplinePsos - same
+// scene-pass residency (MSAA, HDR-aware, alpha blended) - differing only in
+// the depth state, which is the whole reason there are two.
+// Defined below; declared here because EnsureTextTexture is written first and
+// both it and EnsureIconTexture funnel into it.
+RendererState::TextTextureGpu* UploadRgbaTexture(
+    const NativeGuestOutputRenderContext& context, nrhi::Cmd* cmd,
+    const std::string& key, const uint8_t* pixels, uint32_t width,
+    uint32_t height, uint64_t frame_number);
+
+// Uploads a rasterised string into a GPU texture once and reuses it after.
+// Returns nullptr when the string has no bitmap (empty, or no rasteriser on
+// this platform), in which case the caller simply draws nothing.
+RendererState::TextTextureGpu* EnsureTextTexture(
+    const NativeGuestOutputRenderContext& context, nrhi::Cmd* cmd,
+    const std::string& text, uint32_t pixel_height, uint64_t frame_number) {
+  const std::string key =
+      std::to_string(pixel_height) + ":" + text;
+  const auto existing = g_r.text_textures.find(key);
+  if (existing != g_r.text_textures.end()) {
+    existing->second.last_used_frame = frame_number;
+    return existing->second.tex != nullptr ? &existing->second : nullptr;
+  }
+
+  const text_texture::Bitmap& bitmap =
+      text_texture::Rasterise(text, pixel_height);
+  return UploadRgbaTexture(context, cmd, key, bitmap.pixels.data(),
+                           bitmap.width, bitmap.height, frame_number);
+}
+
+// One of the embedded retail icons, uploaded on first use. Shares the text
+// cache because the lifetime rules are identical - upload once, evict when
+// unused - and a second cache would be the same code with a different name.
+RendererState::TextTextureGpu* EnsureIconTexture(
+    const NativeGuestOutputRenderContext& context, nrhi::Cmd* cmd,
+    const std::string& name, uint64_t frame_number) {
+  const std::string key = "icon:" + name;
+  const auto existing = g_r.text_textures.find(key);
+  if (existing != g_r.text_textures.end()) {
+    existing->second.last_used_frame = frame_number;
+    return existing->second.tex != nullptr ? &existing->second : nullptr;
+  }
+  for (const marker_icons::Icon& icon : marker_icons::kIcons) {
+    if (name == icon.name) {
+      return UploadRgbaTexture(context, cmd, key, icon.rgba, icon.width,
+                               icon.height, frame_number);
+    }
+  }
+  // Unknown name: cached as a negative so the linear scan above runs once,
+  // and the caller falls back to the ring.
+  g_r.text_textures.emplace(key, RendererState::TextTextureGpu{});
+  return nullptr;
+}
+
+RendererState::TextTextureGpu* UploadRgbaTexture(
+    const NativeGuestOutputRenderContext& context, nrhi::Cmd* cmd,
+    const std::string& key, const uint8_t* pixels, uint32_t width,
+    uint32_t height, uint64_t frame_number) {
+  RendererState::TextTextureGpu entry;
+  entry.last_used_frame = frame_number;
+  if (pixels == nullptr || width == 0 || height == 0) {
+    // Cached as a negative result too, so something that cannot be produced
+    // is not retried every frame.
+    g_r.text_textures.emplace(key, entry);
+    return nullptr;
+  }
+
+  nrhi::Device* device = context.device;
+  const uint32_t pitch = (width * 4u + (nrhi::kRowPitchAlignment - 1u)) &
+                         ~(nrhi::kRowPitchAlignment - 1u);
+  nrhi::TextureDesc desc;
+  desc.kind = nrhi::TextureKind::k2D;
+  desc.width = width;
+  desc.height = height;
+  desc.mip_levels = 1;
+  desc.format = nrhi::Format::kR8G8B8A8_UNORM;
+  desc.initial_state = nrhi::ResourceState::kCopyDest;
+  entry.tex = device->CreateTexture(desc);
+  if (entry.tex == nullptr) {
+    g_r.text_textures.emplace(key, RendererState::TextTextureGpu{});
+    return nullptr;
+  }
+  nrhi::TextureViewDesc srv;
+  srv.dimension = nrhi::ViewDimension::k2D;
+  srv.format = nrhi::Format::kR8G8B8A8_UNORM;
+  srv.mip_levels = 1;
+  entry.srv = device->CreateTextureView(entry.tex, srv);
+  entry.upload = CreateUploadBuffer(device, size_t(pitch) * height,
+                                    nrhi::BufferBindClass::kCopySrc);
+  uint8_t* mapped =
+      entry.upload ? static_cast<uint8_t*>(device->Map(entry.upload)) : nullptr;
+  if (entry.srv == nullptr || mapped == nullptr) {
+    device->DestroyDeferred(entry.tex);
+    g_r.text_textures.emplace(key, RendererState::TextTextureGpu{});
+    return nullptr;
+  }
+  for (uint32_t y = 0; y < height; ++y) {
+    std::memcpy(mapped + size_t(y) * pitch, pixels + size_t(y) * width * 4u,
+                width * 4u);
+  }
+  cmd->CopyBufferToTexture(entry.tex, 0, 0, entry.upload, 0, pitch, width,
+                           height, 1);
+  cmd->Barrier(entry.tex, nrhi::ResourceState::kCopyDest,
+               nrhi::ResourceState::kPixelShaderResource);
+  cmd->FlushBarriers();
+  entry.width = width;
+  entry.height = height;
+  return &g_r.text_textures.emplace(key, entry).first->second;
+}
+
+// Emits one camera-facing text quad. Shared by nameplates and marker labels so
+// there is a single place where the billboard basis and UV orientation are
+// decided - getting those out of step between two copies is exactly how the
+// first version came out mirrored.
+//
+// `center_y` is the vertical centre of the text. Returns false when there was
+// nothing to draw (no bitmap, or the ring region is full).
+bool EmitTextBillboard(const NativeGuestOutputRenderContext& context,
+                       nrhi::Cmd* cmd, const FrameScene& scene,
+                       const std::string& text, float x, float center_y,
+                       float z, float world_height, float alpha,
+                       const float right[2], uint32_t ui_region,
+                       uint32_t& ui_offset, uint64_t frame_number) {
+  if (text.empty() || alpha <= 0.001f) {
+    return false;
+  }
+  // Rasterised at a fixed pixel height and scaled in WORLD space, so the cache
+  // holds one bitmap per string rather than one per string per distance.
+  const RendererState::TextTextureGpu* texture =
+      EnsureTextTexture(context, cmd, text, 48u, frame_number);
+  if (texture == nullptr || texture->height == 0) {
+    return false;
+  }
+  const float half_h = world_height * 0.5f;
+  const float aspect = float(texture->width) / float(std::max(1u, texture->height));
+  const float half_w = half_h * aspect;
+
+  const float corners[4][2] = {{-half_w, -half_h},
+                               {half_w, -half_h},
+                               {-half_w, half_h},
+                               {half_w, half_h}};
+  // v increases downward: the rasteriser hands back a top-down bitmap and
+  // texture row 0 is v=0, so the quad's TOP corners sample v=0. World +Y is up
+  // (WorldToScreen: NDC +y is the top), so top corners are the +half_h ones.
+  const float uvs[4][2] = {{0.f, 1.f}, {1.f, 1.f}, {0.f, 0.f}, {1.f, 0.f}};
+  float verts[4 * 6];
+  for (int i = 0; i < 4; ++i) {
+    verts[i * 6 + 0] = x + right[0] * corners[i][0];
+    verts[i * 6 + 1] = center_y + corners[i][1];
+    verts[i * 6 + 2] = z + right[1] * corners[i][0];
+    verts[i * 6 + 3] = 1.0f;
+    verts[i * 6 + 4] = uvs[i][0];
+    verts[i * 6 + 5] = uvs[i][1];
+  }
+  const uint32_t bytes = uint32_t(sizeof(verts));
+  if (ui_offset + bytes > RendererState::kUiRegionSize) {
+    return false;
+  }
+  std::memcpy(g_r.ui_ring_cpu + ui_region + ui_offset, verts, bytes);
+
+  float consts[24];
+  std::memcpy(consts, scene.view_proj, sizeof(float) * 16);
+  consts[16] = 1.0f;
+  consts[17] = 1.0f;
+  consts[18] = 1.0f;
+  consts[19] = alpha;
+  consts[20] = 0.0f;
+  consts[21] = 0.0f;
+  consts[22] = 0.0f;
+  consts[23] = 0.0f;
+  cmd->SetPipeline(g_r.pso_marker_text);
+  cmd->SetRootConstants(0, 24, consts, 0);
+  cmd->SetTexture(1, texture->srv);
+  cmd->SetVertexBuffer(g_r.ui_ring, ui_region + ui_offset, bytes, 24);
+  cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleStrip);
+  cmd->Draw(4, 0);
+  ui_offset += bytes;
+  return true;
+}
+
+// The camera-facing horizontal basis for a billboard at (x, z).
+//
+// right = normalize(cross(toCamera, worldUp)). The opposite sign renders every
+// quad mirrored - invisible on a symmetric ring, glaringly obvious the moment
+// text was drawn with it, which is how it was found.
+void BillboardRight(const float camera[3], bool have_camera, float x, float z,
+                    float out_right[2]) {
+  out_right[0] = 1.0f;
+  out_right[1] = 0.0f;
+  if (!have_camera) {
+    return;
+  }
+  const float dx = camera[0] - x;
+  const float dz = camera[2] - z;
+  const float len = std::sqrt(dx * dx + dz * dz);
+  if (len <= 1e-4f) {
+    return;
+  }
+  out_right[0] = dz / len;
+  out_right[1] = -dx / len;
+}
+
+bool EnsureMarkerPsos(const NativeGuestOutputRenderContext& context) {
+  nrhi::Device* device = context.device;
+  for (nrhi::Pipeline** p : {&g_r.pso_marker_depth, &g_r.pso_marker_overlay,
+                            &g_r.pso_marker_text}) {
+    if (*p != nullptr) {
+      device->DestroyDeferred(*p);
+      *p = nullptr;
+    }
+  }
+  nrhi::ShaderMacro defs[2];
+  uint32_t def_count = 0;
+  if (g_r.hdr_active) {
+    defs[def_count++] = {"HDR", "1"};
+  }
+  defs[def_count] = {nullptr, nullptr};
+  const char* variant = g_r.hdr_active ? "HDR=1" : "";
+  nrhi::Shader* vs = device->CreateShader(
+      MakeShaderDesc(nrhi::ShaderStage::kVertex, "marker.hlsl",
+                     kMarkerShaderSource, "vs_main", nullptr, ""));
+  nrhi::Shader* ps = device->CreateShader(MakeShaderDesc(
+      nrhi::ShaderStage::kPixel, "marker.hlsl", kMarkerShaderSource, "ps_main",
+      def_count != 0 ? defs : nullptr, variant));
+  if (vs == nullptr || ps == nullptr) {
+    REXLOG_ERROR("native-scene: marker shader compile failed");
+    g_r.failed = true;
+    return false;
+  }
+  // POSITION.w is unused by the VS (it adds vp3 unconditionally) but kept so
+  // the layout matches the spline vertex's leading float4 and the same ring
+  // buffer stride reasoning applies.
+  static constexpr nrhi::InputElementDesc input_marker[2] = {
+      {"POSITION", 0, 0, nrhi::Format::kR32G32B32A32_FLOAT, 0},
+      {"TEXCOORD", 0, 1, nrhi::Format::kR32G32_FLOAT, 16}};
+  nrhi::GraphicsPipelineDesc mp;
+  mp.layout = g_r.layout;
+  mp.vs = vs;
+  mp.ps = ps;
+  mp.cull = nrhi::CullMode::kNone;  // billboards face the camera either way
+  mp.depth_clip = true;
+  mp.input_elements = input_marker;
+  mp.input_element_count = 2;
+  mp.vertex_stride = 24;
+  mp.rtv_format =
+      g_r.hdr_active ? g_r.hdr_scene_format : context.guest_output->format();
+  mp.dsv_format = nrhi::Format::kD32_FLOAT;
+  mp.sample_count = g_r.msaa;
+  mp.blend.enable = true;
+  mp.blend.op = nrhi::BlendOp::kAdd;
+  mp.blend.op_alpha = nrhi::BlendOp::kAdd;
+  mp.blend.src = nrhi::BlendFactor::kSrcAlpha;
+  mp.blend.dst = nrhi::BlendFactor::kInvSrcAlpha;
+  mp.blend.src_alpha = nrhi::BlendFactor::kSrcAlpha;
+  mp.blend.dst_alpha = nrhi::BlendFactor::kInvSrcAlpha;
+
+  // Markers: occluded by the world.
+  mp.depth.test_enable = true;
+  mp.depth.write_enable = false;
+  mp.depth.func = nrhi::CompareFunc::kLessEqual;
+  g_r.pso_marker_depth = device->CreateGraphicsPipeline(mp);
+
+  // Nameplates: never occluded.
+  mp.depth.test_enable = false;
+  mp.depth.write_enable = false;
+  mp.depth.func = nrhi::CompareFunc::kAlways;
+  g_r.pso_marker_overlay = device->CreateGraphicsPipeline(mp);
+
+  // Text: same depth-disabled state, textured pixel shader.
+  nrhi::Shader* ps_text = device->CreateShader(MakeShaderDesc(
+      nrhi::ShaderStage::kPixel, "marker.hlsl", kMarkerShaderSource, "ps_text",
+      def_count != 0 ? defs : nullptr, variant));
+  if (ps_text == nullptr) {
+    REXLOG_ERROR("native-scene: marker text shader compile failed");
+    g_r.failed = true;
+    return false;
+  }
+  mp.ps = ps_text;
+  g_r.pso_marker_text = device->CreateGraphicsPipeline(mp);
+  device->DestroyDeferred(ps_text);
+
+  device->DestroyDeferred(vs);
+  device->DestroyDeferred(ps);
+  if (g_r.pso_marker_depth == nullptr || g_r.pso_marker_overlay == nullptr ||
+      g_r.pso_marker_text == nullptr) {
+    REXLOG_ERROR("native-scene: marker PSO creation failed");
+    g_r.failed = true;
+    return false;
+  }
+  return true;
+}
+
 bool EnsureSplinePsos(const NativeGuestOutputRenderContext& context) {
   nrhi::Device* device = context.device;
   {
@@ -5473,6 +5771,7 @@ bool EnsurePipeline(const NativeGuestOutputRenderContext& context) {
     if (!EnsureScenePsoFamily(context) || !EnsureResolvePso(context) ||
         !EnsureBlurPsos(context) || !EnsureOutlineEdgePso(context) ||
         !Ensure2dPso(context) || !EnsureSplinePsos(context) ||
+        !EnsureMarkerPsos(context) ||
         !EnsureShadowPsos(context)) {
       if (g_r.showcase_shaders) {
         // A showcase-variant build failure must not pin the sticky failure
@@ -16472,6 +16771,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
   // still tick during menus/loading.
   skate3::lua_client::Tick();
   skate3::retail_ui::Tick();
+  // Publishes this frame's nameplate billboards for the scene pass below.
+  skate3::nameplates::Update();
   NativeGuestOutputRenderContext context = output_context;
   if (!SceneEnabled() ||
       (context.backend != NativeGuestOutputBackend::kD3D12 &&
@@ -19909,6 +20210,14 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
                     gt.payload_fp);
       }
       it = g_r.tex_store.emplace(key, gt).first;
+      // Inventory for identifying retail's own art (marker icons and the
+      // like). Logged at FIRST SIGHT only, so standing at a challenge marker
+      // with this on yields a short list rather than a flood - and icons are
+      // small, which is the filter that actually narrows it down.
+      if (REXCVAR_GET(skate3_native_render_scene_ui_tex_log)) {
+        REXLOG_INFO("ui-tex: key={:016X} {}x{} valid={}", key, px_w, px_h,
+                    gt.valid ? 1 : 0);
+      }
     }
     if (it != g_r.tex_store.end() &&
         (tr2d || (g_in_menus_frame.load(std::memory_order_relaxed) &&
@@ -19990,6 +20299,162 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
       cmd->Draw(s.count, 0);
       ui_offset += bytes;
       ++drawn_spline;
+    }
+  }
+
+  // In-world marker billboards. Drawn here, in the scene pass, for the same
+  // reason the splines are: they are world objects, and the depth-tested
+  // variant has to be depth-tested against the world that was just rendered.
+  if (g_r.pso_marker_depth != nullptr && g_r.ui_ring_cpu != nullptr) {
+    const std::vector<world_markers::Billboard> billboards =
+        world_markers::Snapshot();
+    if (!billboards.empty()) {
+      float camera[3] = {0.0f, 0.0f, 0.0f};
+      const bool have_camera = CameraPosition(camera);
+      const float hold_progress = world_markers::HoldProgress();
+
+      // Retail's own marker art, if a key has been pointed at it. Looked up
+      // EVERY frame rather than cached: tex_store entries are revalidated and
+      // can be re-decoded in place, so holding an srv across frames would
+      // eventually bind a texture being rewritten underneath us. A miss just
+      // leaves icon_srv null and the ring is drawn instead, which is also what
+      // happens before the game has drawn that texture even once.
+      nrhi::TextureView* icon_srv = nullptr;
+      {
+        const std::string icon_key_text(REXCVAR_GET(skate3_marker_icon_key));
+        if (!icon_key_text.empty()) {
+          const uint64_t icon_key =
+              std::strtoull(icon_key_text.c_str(), nullptr, 16);
+          if (icon_key != 0) {
+            const auto icon_it = g_r.tex_store.find(icon_key);
+            if (icon_it != g_r.tex_store.end() && icon_it->second.valid) {
+              icon_srv = icon_it->second.srv;
+            }
+          }
+        }
+      }
+      for (const world_markers::Billboard& b : billboards) {
+        // Cylindrical billboard: rotate to face the camera around Y only, so
+        // markers stand upright like a sign instead of tipping to meet an
+        // overhead camera. Y is the vertical axis in this engine.
+        float right[2];
+        BillboardRight(camera, have_camera, b.x, b.z, right);
+        const float rx = right[0];
+        const float rz = right[1];
+        const float h = b.size * 0.5f;
+        // POSITION.xyz world, .w = 1 (the VS adds vp3 unconditionally), then
+        // the UV. Triangle strip order: BL, BR, TL, TR.
+        const float corners[4][2] = {{-h, -h}, {h, -h}, {-h, h}, {h, h}};
+        const float uvs[4][2] = {{0.f, 1.f}, {1.f, 1.f}, {0.f, 0.f}, {1.f, 0.f}};
+        float verts[4 * 6];
+        for (int i = 0; i < 4; ++i) {
+          verts[i * 6 + 0] = b.x + rx * corners[i][0];
+          verts[i * 6 + 1] = b.y + corners[i][1] + b.size * 0.5f;
+          verts[i * 6 + 2] = b.z + rz * corners[i][0];
+          verts[i * 6 + 3] = 1.0f;
+          verts[i * 6 + 4] = uvs[i][0];
+          verts[i * 6 + 5] = uvs[i][1];
+        }
+        const uint32_t bytes = uint32_t(sizeof(verts));
+        if (ui_offset + bytes > RendererState::kUiRegionSize) {
+          break;  // ring region full; the rest wait for the next frame.
+        }
+        std::memcpy(g_r.ui_ring_cpu + ui_region + ui_offset, verts, bytes);
+
+        float consts[24];
+        std::memcpy(consts, scene.view_proj, sizeof(float) * 16);
+        consts[16] = float((b.color >> 16) & 0xFFu) / 255.0f;  // R
+        consts[17] = float((b.color >> 8) & 0xFFu) / 255.0f;   // G
+        consts[18] = float(b.color & 0xFFu) / 255.0f;          // B
+        consts[19] = float((b.color >> 24) & 0xFFu) / 255.0f;  // A
+        consts[20] = b.active ? hold_progress : 0.0f;
+        consts[21] = b.active ? 1.0f : 0.0f;
+        consts[22] = 0.0f;
+        consts[23] = 0.0f;
+        // Per-marker embedded retail art wins over the global cvar override,
+        // which stays as the runtime-capture experiment's entry point.
+        nrhi::TextureView* draw_srv = icon_srv;
+        if (!b.texture.empty()) {
+          const RendererState::TextTextureGpu* embedded =
+              EnsureIconTexture(context, cmd, b.texture, frame_number);
+          if (embedded != nullptr) {
+            draw_srv = embedded->srv;
+          }
+        }
+        if (draw_srv != nullptr) {
+          // Retail's art, tinted by the marker colour. The textured pipeline
+          // is depth-DISABLED, so an icon marker reads like retail's own
+          // (which is drawn over the world) rather than being clipped by a
+          // kerb the way the ring deliberately is.
+          cmd->SetPipeline(g_r.pso_marker_text);
+          cmd->SetRootConstants(0, 24, consts, 0);
+          cmd->SetTexture(1, draw_srv);
+        } else {
+          cmd->SetPipeline(g_r.pso_marker_depth);
+          cmd->SetRootConstants(0, 24, consts, 0);
+        }
+        cmd->SetVertexBuffer(g_r.ui_ring, ui_region + ui_offset, bytes, 24);
+        cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleStrip);
+        cmd->Draw(4, 0);
+        ui_offset += bytes;
+
+        // The marker's own label, sitting just under the ring. Scaled with the
+        // marker so a bigger marker gets bigger text, and drawn with the
+        // depth-DISABLED text pipeline: a ring may legitimately be hidden by
+        // the world, but a label that is half-swallowed by a kerb is just
+        // unreadable.
+        const float label_height = b.size * 0.28f;
+        const float gap = b.size * 0.10f;
+        EmitTextBillboard(context, cmd, scene, b.text, b.x,
+                          b.y - gap - label_height * 0.5f, b.z, label_height,
+                          float((b.color >> 24) & 0xFFu) / 255.0f, right,
+                          ui_region, ui_offset, frame_number);
+      }
+    }
+  }
+
+  // Player nameplates: the same billboard, textured with a rasterised name and
+  // drawn with the depth-disabled pipeline so a name is never swallowed by
+  // geometry. These replaced an ImGui foreground overlay - see
+  // skate3_player_nameplates.h.
+  if (g_r.pso_marker_text != nullptr && g_r.ui_ring_cpu != nullptr) {
+    const std::vector<nameplates::Plate> plates = nameplates::Snapshot();
+    if (!plates.empty()) {
+      float camera[3] = {0.0f, 0.0f, 0.0f};
+      const bool have_camera = CameraPosition(camera);
+      // Names are few and change rarely, but a long session with people
+      // joining and leaving would otherwise accumulate one texture per name
+      // ever seen. Swept on a slow cadence rather than every frame because
+      // nothing here is urgent and the sweep walks the whole map.
+      if ((frame_number % 600u) == 0u) {
+        for (auto it = g_r.text_textures.begin();
+             it != g_r.text_textures.end();) {
+          if (frame_number - it->second.last_used_frame > 600u) {
+            if (it->second.tex != nullptr) {
+              context.device->DestroyDeferred(it->second.tex);
+            }
+            if (it->second.srv != nullptr) {
+              context.device->DestroyDeferred(it->second.srv);
+            }
+            if (it->second.upload != nullptr) {
+              context.device->DestroyDeferred(it->second.upload);
+            }
+            it = g_r.text_textures.erase(it);
+          } else {
+            ++it;
+          }
+        }
+        text_texture::SweepUnused();
+      }
+      for (const nameplates::Plate& plate : plates) {
+        float right[2];
+        BillboardRight(camera, have_camera, plate.position[0],
+                       plate.position[2], right);
+        EmitTextBillboard(context, cmd, scene, plate.name, plate.position[0],
+                          plate.position[1], plate.position[2], plate.height,
+                          plate.alpha, right, ui_region, ui_offset,
+                          frame_number);
+      }
     }
   }
 

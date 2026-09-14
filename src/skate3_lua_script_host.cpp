@@ -161,6 +161,46 @@ int Lua_Print(lua_State* L) {
   return 0;
 }
 
+// lua_pcall message handler: turns a bare "file:line: message" into that same
+// message followed by the stack that produced it.
+//
+// Without one, a failing script reports the line that threw and nothing about
+// how execution got there - which for an event handler three calls deep is the
+// difference between a usable report and a guess.
+int Lua_Traceback(lua_State* L) {
+  const char* message = lua_tostring(L, 1);
+  if (message == nullptr) {
+    // error() was called with a non-string (a table, typically). Stringifying
+    // it here would produce "table: 0x...", so it is passed through untouched
+    // and reported as whatever it is.
+    return 1;
+  }
+  luaL_traceback(L, L, message, 1);
+  return 1;
+}
+
+// __skate_error(message, traceback): the scheduler's error reporter, for a
+// thread that failed AFTER its first wait.
+//
+// Those cannot be reported at a call site: by the time the thread resumes, the
+// C++ call that started it has long returned, and the tick that resumed it has
+// no idea whether it was a command handler or an event. So the scheduler
+// reports them itself. Upvalues: lightuserdata host, resource name string.
+int Lua_ScriptError(lua_State* L) {
+  auto* host = static_cast<LuaScriptHost*>(
+      lua_touserdata(L, lua_upvalueindex(1)));
+  const std::string resource = lua_tostring(L, lua_upvalueindex(2));
+  const char* message = lua_tostring(L, 1);
+  const char* traceback = lua_tostring(L, 2);
+  std::string detail = message != nullptr ? message : "unknown error";
+  if (traceback != nullptr && *traceback != 0) {
+    detail += "\n";
+    detail += traceback;
+  }
+  host->ReportScriptError(resource, "thread", detail);
+  return 0;
+}
+
 // Splits raw_args on whitespace into a vector of tokens, matching how
 // FiveM's RegisterCommand args table is built from a typed console line.
 std::vector<std::string> SplitArgs(std::string_view raw_args) {
@@ -378,7 +418,136 @@ void RestrictStandardLibrary(lua_State* L) {
   lua_pop(L, 1);
 }
 
+
+// Calls a Lua function in a context where it is allowed to call Skate.Wait.
+//
+// Expects the function on the stack with `argument_count` arguments pushed
+// above it - exactly what lua_pcall wants - and returns LUA_OK or LUA_ERRRUN
+// with an error message on top, also exactly like lua_pcall, so call sites
+// keep their shape.
+//
+// The reason this exists: a pcall frame is not yieldable, so a handler that
+// called Skate.Wait got "attempt to yield across a C-call boundary" rather
+// than waiting. Waiting inside a command or event handler is one of the first
+// things anybody writes, so instead of calling the function directly this
+// hands it to the scheduler's __skate_spawn, which runs it in a coroutine and
+// parks it if it waits.
+//
+// An error raised AFTER the first wait cannot be reported here, because this
+// call has already returned by then; the scheduler logs those with a
+// traceback instead.
+[[nodiscard]] bool CallYieldable(lua_State* L, int argument_count,
+                                 std::string& error) {
+  lua_getglobal(L, "__skate_spawn");
+  if (!lua_isfunction(L, -1)) {
+    // The shim failed to load. Fall back to calling directly so the resource
+    // still runs its handlers - without Wait, but working - rather than
+    // silently doing nothing.
+    lua_pop(L, 1);
+    const bool ok = lua_pcall(L, argument_count, 0, 0) == LUA_OK;
+    if (!ok) {
+      error = lua_tostring(L, -1) != nullptr ? lua_tostring(L, -1)
+                                             : "unknown error";
+      lua_pop(L, 1);
+    }
+    return ok;
+  }
+  // Move __skate_spawn below the function and its arguments.
+  lua_insert(L, -(argument_count + 2));
+  if (lua_pcall(L, argument_count + 1, 3, 0) != LUA_OK) {
+    // The scheduler itself broke, which is not a script error.
+    error = std::string("thread scheduler error: ") +
+            (lua_tostring(L, -1) != nullptr ? lua_tostring(L, -1)
+                                            : "unknown error");
+    lua_pop(L, 1);
+    return false;
+  }
+  // __skate_spawn returns ok, then message and traceback when not ok.
+  const bool ok = lua_toboolean(L, -3) != 0;
+  if (!ok) {
+    const char* message = lua_tostring(L, -2);
+    const char* traceback = lua_tostring(L, -1);
+    error = message != nullptr ? message : "unknown error";
+    if (traceback != nullptr && *traceback != 0) {
+      error += "\n";
+      error += traceback;
+    }
+  }
+  lua_pop(L, 3);
+  return ok;
+}
+
+// Hands one loaded-but-not-yet-run chunk (on top of the stack) to the boot
+// queue, so every script in a resource can be run as a single ordered thread.
+[[nodiscard]] bool QueueResourceChunk(lua_State* L) {
+  lua_getglobal(L, "__skate_add_chunk");
+  if (!lua_isfunction(L, -1)) {
+    lua_pop(L, 1);
+    return false;
+  }
+  lua_insert(L, -2);
+  return lua_pcall(L, 1, 0, 0) == LUA_OK;
+}
+
+// Runs the queued chunks as one thread. Returns LUA_OK, or LUA_ERRRUN with a
+// message on top. A resource that waits at top level returns LUA_OK here with
+// the rest of its scripts still to run on later ticks - so it is reported as
+// started before it has finished initialising, which is the unavoidable cost
+// of allowing a top-level wait at all.
+[[nodiscard]] bool RunResourceChunks(lua_State* L, std::string& error) {
+  lua_getglobal(L, "__skate_run_chunks");
+  if (!lua_isfunction(L, -1)) {
+    lua_pop(L, 1);
+    error = "thread scheduler missing; cannot run resource scripts";
+    return false;
+  }
+  bool ok = false;
+  if (lua_pcall(L, 0, 3, 0) != LUA_OK) {
+    error = lua_tostring(L, -1) != nullptr ? lua_tostring(L, -1)
+                                           : "unknown error";
+    lua_pop(L, 1);
+  } else {
+    ok = lua_toboolean(L, -3) != 0;
+    if (!ok) {
+      const char* message = lua_tostring(L, -2);
+      const char* traceback = lua_tostring(L, -1);
+      error = message != nullptr ? message : "unknown error";
+      if (traceback != nullptr && *traceback != 0) {
+        error += "\n";
+        error += traceback;
+      }
+    }
+    lua_pop(L, 3);
+  }
+  // Not left reachable from script code: these exist for the loader, and a
+  // resource calling them would be injecting itself into its own boot chain.
+  lua_pushnil(L);
+  lua_setglobal(L, "__skate_add_chunk");
+  lua_pushnil(L);
+  lua_setglobal(L, "__skate_run_chunks");
+  return ok;
+}
+
 }  // namespace
+
+void LuaScriptHost::ReportScriptError(const std::string& resource,
+                                     const std::string& context,
+                                     const std::string& detail) {
+  // One log entry, not one per line of traceback: the console interleaves
+  // output from every resource, and a traceback split across entries can end
+  // up with somebody else's print() in the middle of it.
+  std::string text = "SCRIPT ERROR";
+  if (!context.empty()) {
+    text += " in ";
+    text += context;
+  }
+  text += ": ";
+  text += detail;
+  log_sink_.Append(resource, text);
+  // Still written to stderr as well, because the dedicated server is a console
+  // app where that is the thing an operator is actually looking at.
+  std::fprintf(stderr, "[lua] %s: %s\n", resource.c_str(), text.c_str());
+}
 
 ResourceManifest LuaScriptHost::ReadManifest(const std::string& name) const {
   ResourceManifest manifest;
@@ -436,6 +605,12 @@ lua_State* LuaScriptHost::CreateResourceLuaState(const std::string& name) {
   lua_pushstring(L, name.c_str());
   lua_pushcclosure(L, &Lua_Print, 2);
   lua_setglobal(L, "print");
+
+  // How the thread scheduler reports an error it cannot hand back to C++.
+  lua_pushlightuserdata(L, this);
+  lua_pushstring(L, name.c_str());
+  lua_pushcclosure(L, &Lua_ScriptError, 2);
+  lua_setglobal(L, "__skate_error");
 
   // Event natives, all sharing RegisterCommand's upvalue shape.
   static constexpr struct {
@@ -499,8 +674,10 @@ lua_State* LuaScriptHost::CreateResourceLuaState(const std::string& name) {
     local function step(co)
       local ok, wait_ms = coroutine.resume(co)
       if not ok then
-        print('thread error: ' .. tostring(wait_ms))
-        print(debug.traceback(co))
+        -- Reported rather than printed: this is an error, and the console
+        -- marks it as one. See Lua_ScriptError for why the scheduler has to
+        -- report these itself instead of a call site doing it.
+        __skate_error(tostring(wait_ms), debug.traceback(co))
         return nil
       end
       if coroutine.status(co) == 'dead' then
@@ -528,8 +705,14 @@ lua_State* LuaScriptHost::CreateResourceLuaState(const std::string& name) {
     -- tick). Resolution is one tick, so a wait is never shorter than
     -- requested but can overshoot by a frame.
     function Skate.Wait(ms)
+      -- Almost everything is yieldable now: script bodies, command handlers,
+      -- event handlers, state-bag handlers and NUI callbacks all run as
+      -- threads. What is left is an export, which has to return its value to
+      -- the caller immediately and so cannot be suspended.
       if not coroutine.isyieldable() then
-        error('Skate.Wait may only be called inside a Skate.CreateThread thread', 2)
+        error('Skate.Wait cannot be used here - this code has to return a ' ..
+              'value immediately (an export). Wrap the waiting part in ' ..
+              'Skate.CreateThread.', 2)
       end
       return coroutine.yield(ms or 0)
     end
@@ -542,6 +725,61 @@ lua_State* LuaScriptHost::CreateResourceLuaState(const std::string& name) {
       return Skate.CreateThread(function()
         Skate.Wait(ms)
         fn()
+      end)
+    end
+
+    -- Runs fn(...) as a scheduled thread, so it may call Skate.Wait. Every
+    -- Lua entry point C++ has except exports comes through here.
+    --
+    -- Returns true, or false plus the error message if fn failed BEFORE its
+    -- first wait - which is what lets C++ report a broken handler the way a
+    -- plain call would. An error after the first wait cannot be reported that
+    -- way (the call has already returned), so `step` logs those instead.
+    -- That is the whole reason this is not just CreateThread: same machinery,
+    -- different error contract.
+    function __skate_spawn(fn, ...)
+      if type(fn) ~= 'function' then
+        return false, 'attempt to call a non-function'
+      end
+      -- table.pack/unpack rather than a closure over ... because ... is not
+      -- visible inside the coroutine body.
+      local args = table.pack(...)
+      local co = coroutine.create(function()
+        return fn(table.unpack(args, 1, args.n))
+      end)
+      local ok, wait_ms = coroutine.resume(co)
+      if not ok then
+        -- debug.traceback(co) reads the coroutine's OWN stack, which is still
+        -- intact here even though the resume failed - that is the whole
+        -- traceback, from the throw point down, rather than this line.
+        return false, tostring(wait_ms), debug.traceback(co)
+      end
+      if coroutine.status(co) ~= 'dead' then
+        pending[#pending + 1] = { co = co, wake = now() + (tonumber(wait_ms) or 0) }
+      end
+      return true
+    end
+
+    -- A resource's scripts, collected then run as ONE thread.
+    --
+    -- One thread rather than one per script is what preserves load order: the
+    -- manifest promises that a later script sees what an earlier one defined,
+    -- and running them as separate threads would break that the moment the
+    -- first one waited. Chained inside a single coroutine, script 2 cannot
+    -- start until script 1 has returned, wait or no wait.
+    local boot = {}
+
+    function __skate_add_chunk(fn)
+      boot[#boot + 1] = fn
+    end
+
+    function __skate_run_chunks()
+      local chunks = boot
+      boot = {}
+      return __skate_spawn(function()
+        for i = 1, #chunks do
+          chunks[i]()
+        end
       end)
     end
 
@@ -699,9 +937,20 @@ bool LuaScriptHost::StartResourceLocked(const std::string& name,
   // order, so a later script sees what an earlier one defined.
   for (const std::string& script_file : scripts) {
     const auto script_path = resources_root_ / name / script_file;
-    if (luaL_dofile(L, script_path.string().c_str()) != LUA_OK) {
-      std::fprintf(stderr, "[lua] %s/%s: %s\n", name.c_str(),
-                  script_file.c_str(), lua_tostring(L, -1));
+    if (luaL_loadfile(L, script_path.string().c_str()) != LUA_OK ||
+        !QueueResourceChunk(L)) {
+      ReportScriptError(name, "loading " + script_file,
+                        lua_tostring(L, -1) != nullptr ? lua_tostring(L, -1)
+                                                       : "unknown error");
+      lua_close(L);
+      return false;
+    }
+  }
+
+  {
+    std::string error;
+    if (!RunResourceChunks(L, error)) {
+      ReportScriptError(name, "script load", error);
       lua_close(L);
       return false;
     }
@@ -728,13 +977,27 @@ bool LuaScriptHost::EnsureResourceFromSources(
   if (L == nullptr) {
     return false;
   }
+  // Loaded first, run second: the scripts go into the scheduler's boot queue
+  // and then run as one ordered thread, so a top-level Skate.Wait suspends
+  // loading instead of erroring. Compile errors are still caught per script,
+  // with the file named.
   for (const ScriptChunk& chunk : chunks) {
     const std::string chunk_name = "@" + name + "/" + chunk.chunk_name;
     if (luaL_loadbuffer(L, chunk.source.data(), chunk.source.size(),
                         chunk_name.c_str()) != LUA_OK ||
-        lua_pcall(L, 0, 0, 0) != LUA_OK) {
-      std::fprintf(stderr, "[lua] %s/%s: %s\n", name.c_str(),
-                  chunk.chunk_name.c_str(), lua_tostring(L, -1));
+        !QueueResourceChunk(L)) {
+      ReportScriptError(name, "loading " + chunk.chunk_name,
+                        lua_tostring(L, -1) != nullptr ? lua_tostring(L, -1)
+                                                       : "unknown error");
+      lua_close(L);
+      return false;
+    }
+  }
+
+  {
+    std::string error;
+    if (!RunResourceChunks(L, error)) {
+      ReportScriptError(name, "script load", error);
       lua_close(L);
       return false;
     }
@@ -864,20 +1127,26 @@ void LuaScriptHost::Tick() {
     {
       ScopedResourceTimer timer(resource.metrics_accum_ms,
                                 resource.metrics_accum_calls);
+      // The message handler goes on the stack BELOW the function it reports
+      // for, so it is pushed first. Its index is taken absolutely, because a
+      // relative one would be measured from a top that the call itself moves.
+      lua_pushcfunction(L, &Lua_Traceback);
+      const int traceback_index = lua_gettop(L);
       lua_getglobal(L, "__skate_tick");
       if (lua_type(L, -1) != LUA_TFUNCTION) {
-        lua_pop(L, 1);  // shim missing (it failed to load); nothing to drive.
+        lua_pop(L, 2);  // shim missing (it failed to load); nothing to drive.
         continue;
       }
-      if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
-        // The scheduler itself already contains every thread's errors, so
-        // reaching here means the scheduler broke rather than a script.
-        log_sink_.Append(name, std::string("thread scheduler error: ") +
-                                   lua_tostring(L, -1));
-        std::fprintf(stderr, "[lua] %s: thread scheduler error: %s\n",
-                     name.c_str(), lua_tostring(L, -1));
-        lua_pop(L, 1);
+      if (lua_pcall(L, 0, 0, traceback_index) != LUA_OK) {
+        // Every thread's own errors are already reported by the scheduler, so
+        // reaching here means the scheduler itself broke.
+        ReportScriptError(name, "thread scheduler",
+                          lua_tostring(L, -1) != nullptr
+                              ? lua_tostring(L, -1)
+                              : "unknown error");
+        lua_pop(L, 1);  // the error message
       }
+      lua_pop(L, 1);  // the message handler, which pcall leaves in place
     }
   }
   // Was sampling lua_gc() here too, once per resource per call - measured
@@ -1422,10 +1691,9 @@ void LuaScriptHost::DispatchEventLocked(const std::string& event,
       }
       const int argument_count =
           json_args.empty() ? 0 : PushJsonArgs(L, json_args);
-      if (lua_pcall(L, argument_count, 0, 0) != LUA_OK) {
-        std::fprintf(stderr, "[lua] event '%s': %s\n", event.c_str(),
-                    lua_tostring(L, -1));
-        lua_pop(L, 1);
+      std::string error;
+      if (!CallYieldable(L, argument_count, error)) {
+        ReportScriptError(name, "event '" + event + "' handler", error);
       }
     }
     if (source != 0) {
@@ -1552,10 +1820,12 @@ void LuaScriptHost::SetStateBagLocked(const std::string& bag,
       }
       lua_pushnil(L);  // reserved, for signature compatibility
       lua_pushboolean(L, replicate ? 1 : 0);
-      if (lua_pcall(L, 5, 0, 0) != LUA_OK) {
-        std::fprintf(stderr, "[lua] state bag '%s.%s': %s\n", bag.c_str(),
-                    key.c_str(), lua_tostring(L, -1));
-        lua_pop(L, 1);
+      std::string error;
+      if (!CallYieldable(L, 5, error)) {
+        ReportScriptError(name,
+                          "state bag handler '" + std::string(bag) + "." +
+                              std::string(key) + "'",
+                          error);
       }
     }
   }
@@ -1760,6 +2030,45 @@ int LuaScriptHost::NuiRespond_Impl(lua_State* L) {
   return 0;
 }
 
+bool LuaScriptHost::InvokeResourceCallback(const std::string& resource,
+                                           int callback_ref,
+                                           const std::string& json_args,
+                                           const std::string& context) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = resources_.find(resource);
+  if (it == resources_.end() || it->second.state != ResourceState::kStarted ||
+      it->second.L == nullptr) {
+    return false;
+  }
+  lua_State* L = it->second.L;
+  lua_rawgeti(L, LUA_REGISTRYINDEX, callback_ref);
+  if (!lua_isfunction(L, -1)) {
+    lua_pop(L, 1);
+    return false;
+  }
+  const int argument_count = json_args.empty() ? 0 : PushJsonArgs(L, json_args);
+  ScopedResourceTimer timer(it->second.metrics_accum_ms,
+                            it->second.metrics_accum_calls);
+  std::string error;
+  if (!CallYieldable(L, argument_count, error)) {
+    ReportScriptError(resource, context, error);
+  }
+  return true;
+}
+
+void LuaScriptHost::ReleaseResourceCallback(const std::string& resource,
+                                            int callback_ref) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = resources_.find(resource);
+  // A stopped resource has already had its whole lua_State closed, which took
+  // the registry and every ref in it, so there is nothing to release and
+  // unref-ing into a dead state would be a use-after-free.
+  if (it == resources_.end() || it->second.L == nullptr) {
+    return;
+  }
+  luaL_unref(it->second.L, LUA_REGISTRYINDEX, callback_ref);
+}
+
 bool LuaScriptHost::InvokeNuiCallback(
     const std::string& resource, const std::string& name,
     const std::string& json_body,
@@ -1792,12 +2101,9 @@ bool LuaScriptHost::InvokeNuiCallback(
   lua_pushcclosure(L, &LuaScriptHost::NuiRespond_Impl, 2);
   ScopedResourceTimer timer(resource_it->second.metrics_accum_ms,
                             resource_it->second.metrics_accum_calls);
-  if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
-    log_sink_.Append(resource, std::string("NUI callback '") + name +
-                                   "' error: " + lua_tostring(L, -1));
-    std::fprintf(stderr, "[lua] %s: NUI callback '%s' error: %s\n",
-                 resource.c_str(), name.c_str(), lua_tostring(L, -1));
-    lua_pop(L, 1);
+  std::string error;
+  if (!CallYieldable(L, 2, error)) {
+    ReportScriptError(resource, "NUI callback '" + name + "'", error);
     // The handler died before it could answer; drop the pending entry and
     // report failure so the caller answers the page itself rather than
     // leaving its fetch() hanging on a callback that will never come.
@@ -1832,7 +2138,8 @@ void LuaScriptHost::SweepStaleNuiCallbacks(std::int64_t timeout_ms) {
 }
 
 void LuaScriptHost::InvokeCommand(const std::string& resource,
-                                 int callback_ref, std::string_view raw_args) {
+                                 const std::string& command, int callback_ref,
+                                 std::string_view raw_args) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = resources_.find(resource);
   if (it == resources_.end() || it->second.state != ResourceState::kStarted ||
@@ -1855,10 +2162,9 @@ void LuaScriptHost::InvokeCommand(const std::string& resource,
   lua_pushlstring(L, raw_args.data(), raw_args.size());  // rawCommand
   ScopedResourceTimer timer(it->second.metrics_accum_ms,
                             it->second.metrics_accum_calls);
-  if (lua_pcall(L, 3, 0, 0) != LUA_OK) {
-    std::fprintf(stderr, "[lua] %s: %s\n", resource.c_str(),
-                lua_tostring(L, -1));
-    lua_pop(L, 1);
+  std::string error;
+  if (!CallYieldable(L, 3, error)) {
+    ReportScriptError(resource, "command '" + command + "'", error);
   }
 }
 

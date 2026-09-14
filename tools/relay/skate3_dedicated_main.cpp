@@ -138,43 +138,49 @@ bool CloseSocket(SocketHandle socket_handle) {
 #endif
 }
 
+// Hands out player ids. Never reuses one.
+//
+// The obvious design - a free list that recycles a departed player's id - was
+// what this did, and it is wrong. A client that had peer 7 on screen, lost it,
+// and then meets a DIFFERENT player also given 7 cannot tell them apart, and
+// every per-role cache it keeps (appearance, display name, pose baseline,
+// nameplate smoothing) silently carries over to the wrong person. Ids only
+// ever count upward.
+//
+// The cost is that ids are finite per session: protocol::kMaximumRole bounds
+// how many JOINS one server run can serve, not how many players it can hold at
+// once. At 16000 that is a lot of joining for a session that is realistically
+// restarted far sooner, and the failure is clean - Assign returns 0 and the
+// registration is refused as kFull rather than quietly colliding.
 class RoleAllocator {
 public:
-  static constexpr std::uint32_t kMaxRole = 100;
-
-  RoleAllocator() {
-    for (std::uint32_t role = 1; role <= kMaxRole; ++role) {
-      free_roles_.push_back(role);
-    }
-  }
-
   std::uint32_t Assign(std::uint64_t connection_id) {
     const auto existing = role_by_connection_.find(connection_id);
     if (existing != role_by_connection_.end()) {
-      return existing->second;
+      return existing->second;  // a retried registration, not a new player
     }
-    if (free_roles_.empty()) {
+    if (next_role_ > skate3::multiplayer::protocol::kMaximumRole) {
       return 0;
     }
-    const std::uint32_t role = free_roles_.front();
-    free_roles_.pop_front();
+    const std::uint32_t role = next_role_++;
     role_by_connection_[connection_id] = role;
     return role;
   }
 
   void Release(std::uint64_t connection_id) {
-    const auto existing = role_by_connection_.find(connection_id);
-    if (existing == role_by_connection_.end()) {
-      return;
-    }
-    // To the BACK of the queue: this is what makes the id wait its turn
-    // rather than being reissued to the next joiner.
-    free_roles_.push_back(existing->second);
-    role_by_connection_.erase(existing);
+    // Only the mapping goes; the id itself is retired for the rest of the run.
+    role_by_connection_.erase(connection_id);
+  }
+
+  [[nodiscard]] std::uint32_t issued() const { return next_role_ - 1; }
+  [[nodiscard]] std::uint32_t remaining() const {
+    return next_role_ > skate3::multiplayer::protocol::kMaximumRole
+               ? 0u
+               : skate3::multiplayer::protocol::kMaximumRole - next_role_ + 1u;
   }
 
 private:
-  std::deque<std::uint32_t> free_roles_;
+  std::uint32_t next_role_ = 1;
   std::unordered_map<std::uint64_t, std::uint32_t> role_by_connection_;
 };
 
@@ -425,6 +431,38 @@ int main(int argc, char **argv) {
   static skate3::appearance_store::AppearanceStore appearance_store(
       static_cast<std::size_t>(std::max(options.max_players, 1)) * 4);
   constexpr std::size_t kMaximumAppearanceBytes = 4u * 1024u * 1024u;
+  // Load-test support: lets the harness dress its virtual players in a real
+  // client's outfit. A rebind, not a copy - the store is content-hash keyed,
+  // so both roles end up pointing at the same blob and no bytes move.
+  admin_http.SetAppearanceCloneHandler(
+      // No capture: appearance_store is static, so it is referenced directly
+      // rather than captured (a static has no automatic storage duration).
+      [](std::uint32_t from_role, std::uint32_t to_role) {
+        if (to_role == 0 || from_role == to_role) {
+          return false;
+        }
+        std::uint64_t worn =
+            from_role != 0 ? appearance_store.RoleAppearance(from_role) : 0;
+        if (worn == 0) {
+          // from_role 0 means "anyone wearing something", and it is also the
+          // fallback when the named role has nothing. Identifying the source
+          // by role NUMBER is fragile: roles cap at 100 and are recycled from
+          // the back of the free queue, so a long load-test run eventually
+          // hands role 1 to a virtual player with no appearance and every
+          // clone starts failing. Any stored outfit does the job.
+          for (const auto &entry : appearance_store.Roster()) {
+            if (entry.appearance_id != 0 && entry.role != to_role) {
+              worn = entry.appearance_id;
+              break;
+            }
+          }
+        }
+        if (worn == 0) {
+          return false;  // nobody has uploaded an appearance yet
+        }
+        return appearance_store.SetRoleAppearance(to_role, worn);
+      });
+
   admin_http.SetAppearanceHandlers(
       [](std::uint64_t appearance_id, std::uint32_t role,
          std::vector<std::uint8_t> bytes) {
@@ -633,7 +671,7 @@ int main(int argc, char **argv) {
       resource = entry->second.resource;
       callback_ref = entry->second.callback_ref;
     }
-    script_host.InvokeCommand(resource, callback_ref, args);
+    script_host.InvokeCommand(resource, name, callback_ref, args);
   });
   // Server-side TriggerClientEvent queues onto the HTTP feed that connected
   // clients poll. Wired before any resource starts, so an event fired at

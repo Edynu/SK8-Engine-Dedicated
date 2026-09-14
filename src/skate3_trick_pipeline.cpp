@@ -3584,6 +3584,14 @@ uint32_t CurrentLocalPhysOut() {
   return g_local_phys_out.load(std::memory_order_acquire);
 }
 
+uint32_t CurrentLocalScoreModule() {
+  return g_local_score_module.load(std::memory_order_acquire);
+}
+
+uint64_t CurrentLocalWipeoutRequests() {
+  return g_wipeout_requested_true_count.load(std::memory_order_acquire);
+}
+
 bool CurrentLocalBoardPosition(float out_position[3]) {
   if (out_position == nullptr) {
     return false;
