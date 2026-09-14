@@ -26,9 +26,54 @@ class AdminHttpServer {
   AdminHttpServer(const AdminHttpServer&) = delete;
   AdminHttpServer& operator=(const AdminHttpServer&) = delete;
 
+  // Where to accept connections from. Not a default argument: which of
+  // these a process wants is a security decision, so both call sites have to
+  // say it out loud.
+  enum class Bind {
+    // Loopback only. What a game CLIENT must use: its admin server exists
+    // solely so the in-game CEF console and NUI pages can reach it over
+    // 127.0.0.1, and it exposes POST /api/console/exec, which runs console
+    // commands. Bound to every interface that is remote command execution
+    // offered to anyone who can reach the player's machine.
+    kLoopbackOnly,
+    // Every interface. What the DEDICATED SERVER needs, because connecting
+    // clients fetch resources, appearances and script events from it over
+    // the network. Note this still has no authentication: see the security
+    // notes in docs/.
+    kAllInterfaces,
+  };
+
+  // How much a request has to prove before the admin-only routes will serve
+  // it.
+  enum class AdminAccess {
+    // Loopback is trusted, or any caller presenting the token. What a
+    // DEDICATED SERVER wants: the owner's dashboard on the server box works
+    // with no configuration, and a remote admin sets sv_token.
+    kLoopbackOrToken,
+    // The token, always, even from loopback. What a game CLIENT must use,
+    // and the reason this enum exists: a resource's NUI page is
+    // server-supplied HTML and JavaScript served from the client's own
+    // http://127.0.0.1:<admin port> origin. Loopback is therefore not
+    // evidence of anything on a client - it is exactly where a hostile
+    // server's script runs - and a same-origin fetch('/api/console/exec')
+    // from a NUI page would otherwise be honoured. The client generates a
+    // random token at startup and hands it only to its own dev-console
+    // page, which no resource page can read.
+    kTokenOnly,
+  };
+
+  // Shared secret for the admin-only routes (console exec, console log,
+  // starting/stopping resources). Requests a connecting client legitimately
+  // makes - appearances, script events, its own name, fetching resources -
+  // are never gated, so this never stops anyone from playing. A caller sends
+  // it as an X-Skate3-Token header, or as ?token= where a header cannot be
+  // set. With no token set and kLoopbackOrToken, those routes answer to
+  // loopback only; with no token set and kTokenOnly, they answer to nobody.
+  void SetAdminToken(std::string token, AdminAccess access);
+
   // Starts listening on its own background thread. Returns false if the
   // port could not be bound.
-  bool Start(int port);
+  bool Start(int port, Bind bind);
   void Stop();
 
   // Dispatches a raw typed console line (e.g. "teleport 0 5 0"). This class

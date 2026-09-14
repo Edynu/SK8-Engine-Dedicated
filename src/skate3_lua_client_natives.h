@@ -31,6 +31,13 @@ constexpr int kDevConsoleAdminPortRange = 16;
 // or it would render ANOTHER client's console and execute commands there.
 int DevConsoleAdminPort();
 
+// The random per-run secret the admin-only HTTP routes require on this
+// client. Handed to the dev-console page and to nothing else: a resource's
+// NUI page is server-supplied code running on the same loopback origin, so
+// without this it could POST to /api/console/exec itself. Empty before
+// Initialize has run.
+const std::string& DevConsoleAdminToken();
+
 // Constructs the client's LuaScriptHost + AdminHttpServer and registers the
 // client-only natives (SetEntityPosition, ...) and console-command hooks.
 // Does NOT start any resource - the client has no scripting content of its

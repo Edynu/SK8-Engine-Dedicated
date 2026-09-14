@@ -24,7 +24,7 @@ CefRefPtr<cef_internal::Surface> g_surface;
 
 }  // namespace
 
-void Initialize(int admin_http_port) {
+void Initialize(int admin_http_port, const std::string& admin_token) {
   if (g_surface) {
     return;
   }
@@ -40,7 +40,8 @@ void Initialize(int admin_http_port) {
   g_surface = new cef_internal::Surface("console", kDefaultWidth,
                                         kDefaultHeight, kFrameRate);
   g_surface->CreateBrowser("http://127.0.0.1:" +
-                           std::to_string(admin_http_port) + "/console.html");
+                           std::to_string(admin_http_port) +
+                           "/console.html?token=" + admin_token);
 }
 
 void Shutdown() {

@@ -100,8 +100,17 @@
     stickToBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 24;
   });
 
+  // Per-run secret handed to this page in its URL (see
+  // skate3_cef_console.cpp). The admin routes require it even over loopback,
+  // because a resource's NUI page is server-supplied code on this same
+  // origin and must not be able to run console commands. Sent as a header so
+  // it stays out of request paths and logs.
+  const adminToken =
+      new URLSearchParams(window.location.search).get('token') || '';
+  const adminHeaders = { 'X-Skate3-Token': adminToken };
+
   function poll() {
-    fetch('/api/console/log?since=' + cursor)
+    fetch('/api/console/log?since=' + cursor, { headers: adminHeaders })
       .then(function (res) { return res.json(); })
       .then(function (data) {
         cursor = data.cursor;
@@ -120,7 +129,8 @@
       if (line.trim().length > 0) {
         history.push(line);
         historyIndex = history.length;
-        fetch('/api/console/exec', { method: 'POST', body: line });
+        fetch('/api/console/exec',
+              { method: 'POST', body: line, headers: adminHeaders });
       }
       cmdEl.value = '';
       e.preventDefault();

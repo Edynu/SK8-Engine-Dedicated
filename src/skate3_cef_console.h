@@ -17,7 +17,14 @@ namespace skate3::cef_console {
 // navigates a single fixed browser instance at the local admin HTTP
 // server's console page. Call once, after the admin HTTP server (whose
 // port this points at) is already listening.
-void Initialize(int admin_http_port);
+//
+// `admin_token` is the client's per-run secret for the admin routes, passed
+// in the page's query string. It is what separates THIS page - which is
+// allowed to run console commands - from a resource's NUI page, which is
+// server-supplied HTML served from the same 127.0.0.1 origin and must not
+// be. Separate browser instances cannot read each other's URLs, so a NUI
+// page has no way to learn it. See AdminHttpServer::AdminAccess.
+void Initialize(int admin_http_port, const std::string& admin_token);
 void Shutdown();
 
 // CEF's off-screen-rendered browser has no real native window, so nothing

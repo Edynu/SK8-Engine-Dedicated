@@ -292,7 +292,50 @@ struct AdminHttpServer::Impl {
   PlayerNameHandler player_name_handler;
   NuiFileProvider nui_file_provider;
   OutboundEventQueue outbound;
+  // Shared secret for the admin-only routes, and how strictly it is
+  // required - see IsAdminAuthorized.
+  std::string admin_token;
+  AdminAccess admin_access = AdminAccess::kLoopbackOrToken;
 };
+
+// Gate for the routes that change what the process does, as opposed to the
+// ones a connecting client legitimately calls (appearances, script events,
+// its own name).
+//
+// The dedicated server MUST bind every interface, because clients fetch
+// resources and appearances from it over the network. That means
+// POST /api/console/exec - which runs arbitrary console commands and Lua -
+// was reachable by anyone who could reach the server, including every player
+// who joined it. This is what closes that.
+//
+// Under kLoopbackOrToken a request is authorized if it came from the machine
+// the process is running on, OR it carries a token matching sv_token.
+// Loopback is allowed without a token so the server owner's own dashboard
+// keeps working with no configuration, which is the common case; a remote
+// admin has to set sv_token and send it. With no token configured, remote
+// access is refused rather than silently open.
+//
+// Under kTokenOnly the loopback exemption is gone, because on a client
+// loopback is where server-supplied NUI JavaScript runs. See AdminAccess.
+[[nodiscard]] bool IsAdminAuthorized(const httplib::Request& req,
+                                     const std::string& token,
+                                     AdminHttpServer::AdminAccess access) {
+  if (access == AdminHttpServer::AdminAccess::kLoopbackOrToken &&
+      (req.remote_addr == "127.0.0.1" || req.remote_addr == "::1" ||
+       req.remote_addr == "::ffff:127.0.0.1")) {
+    return true;
+  }
+  if (token.empty()) {
+    return false;
+  }
+  // Header first; the query parameter exists because a browser address bar
+  // cannot set one.
+  const auto header = req.get_header_value("X-Skate3-Token");
+  if (!header.empty()) {
+    return header == token;
+  }
+  return req.has_param("token") && req.get_param_value("token") == token;
+}
 
 AdminHttpServer::AdminHttpServer(LuaScriptHost& host,
                                  std::filesystem::path web_console_dir)
@@ -329,6 +372,11 @@ AdminHttpServer::AdminHttpServer(LuaScriptHost& host,
   impl_->server.Post(
       R"(/api/resources/([^/]+)/(ensure|restart|stop))",
       [this](const httplib::Request& req, httplib::Response& res) {
+        if (!IsAdminAuthorized(req, impl_->admin_token, impl_->admin_access)) {
+          res.status = 403;
+          res.set_content("admin route: token required", "text/plain");
+          return;
+        }
         const std::string name = req.matches[1];
         const std::string action = req.matches[2];
         bool ok = false;
@@ -600,6 +648,14 @@ AdminHttpServer::AdminHttpServer(LuaScriptHost& host,
   // here.
   impl_->server.Get("/api/console/log", [this](const httplib::Request& req,
                                                httplib::Response& res) {
+    // Gated with exec: the log carries every print() and command echo from
+    // every resource, which is server-operator information, not player
+    // information.
+    if (!IsAdminAuthorized(req, impl_->admin_token, impl_->admin_access)) {
+      res.status = 403;
+      res.set_content("admin route: token required", "text/plain");
+      return;
+    }
     std::uint64_t since = 0;
     if (req.has_param("since")) {
       since = std::strtoull(req.get_param_value("since").c_str(), nullptr, 10);
@@ -609,6 +665,11 @@ AdminHttpServer::AdminHttpServer(LuaScriptHost& host,
   });
   impl_->server.Post("/api/console/exec", [this](const httplib::Request& req,
                                                  httplib::Response& res) {
+    if (!IsAdminAuthorized(req, impl_->admin_token, impl_->admin_access)) {
+      res.status = 403;
+      res.set_content("admin route: token required", "text/plain");
+      return;
+    }
     std::string_view line = req.body;
     while (!line.empty() && (line.front() == ' ' || line.front() == '\n' ||
                              line.front() == '\r')) {
@@ -722,7 +783,12 @@ void AdminHttpServer::QueueClientEvent(const std::string& event,
   impl_->outbound.Push(event, json_args, target);
 }
 
-bool AdminHttpServer::Start(int port) {
+void AdminHttpServer::SetAdminToken(std::string token, AdminAccess access) {
+  impl_->admin_token = std::move(token);
+  impl_->admin_access = access;
+}
+
+bool AdminHttpServer::Start(int port, Bind bind) {
   // Refuse a port someone is already listening on, BEFORE trying to bind.
   //
   // bind_to_port cannot be trusted to report this on Windows. httplib's
@@ -763,7 +829,9 @@ bool AdminHttpServer::Start(int port) {
 #endif
   });
 
-  if (!impl_->server.bind_to_port("0.0.0.0", port)) {
+  const char* const bind_address =
+      bind == Bind::kLoopbackOnly ? "127.0.0.1" : "0.0.0.0";
+  if (!impl_->server.bind_to_port(bind_address, port)) {
     return false;
   }
   impl_->thread = std::thread([this]() { impl_->server.listen_after_bind(); });

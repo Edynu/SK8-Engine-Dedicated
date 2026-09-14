@@ -1459,7 +1459,9 @@ void Skate3BaseApp::OnPostSetup() {
   // The port Initialize() actually bound, never the base constant: with two
   // clients on one machine the second binds a different port, and pointing
   // its console at the base would open the FIRST client's console instead.
-  skate3::cef_console::Initialize(skate3::lua_client::DevConsoleAdminPort());
+  skate3::cef_console::Initialize(
+      skate3::lua_client::DevConsoleAdminPort(),
+      skate3::lua_client::DevConsoleAdminToken());
   dev_console_dialog_ =
       std::make_unique<skate3::Skate3DevConsoleDialog>(imgui_drawer());
 

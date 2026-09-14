@@ -32,6 +32,7 @@
 #include <cstdlib>
 #include <deque>
 #include <mutex>
+#include <random>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -58,6 +59,9 @@ constexpr std::int64_t kNuiCallbackTimeoutMs = 15000;
 
 std::unique_ptr<lua_host::LuaScriptHost> g_host;
 std::unique_ptr<lua_host::AdminHttpServer> g_admin;
+// The per-run admin secret; see DevConsoleAdminToken().
+std::string g_admin_token;
+
 // The port g_admin actually bound; see DevConsoleAdminPort().
 int g_admin_port = 0;
 
@@ -1924,6 +1928,8 @@ std::vector<ScriptListEntry> ParseScriptListJson(const std::string& json) {
 
 int DevConsoleAdminPort() { return g_admin_port; }
 
+const std::string& DevConsoleAdminToken() { return g_admin_token; }
+
 void Initialize() {
   // Local resources/ are not auto-STARTED (a connected server's
   // SyncResourcesFromServer push still wins - see its own comment), but
@@ -2021,6 +2027,27 @@ void Initialize() {
       rex::filesystem::GetAppRootFolder() / "web-console";
   g_admin = std::make_unique<lua_host::AdminHttpServer>(*g_host, web_console_dir);
   g_admin->SetConsoleExecHandler(&ExecuteConsoleLine);
+  // Per-run secret for the admin-only routes, required even from loopback.
+  // On a client, loopback is not a trust boundary: every resource's NUI page
+  // is HTML and JavaScript downloaded from whatever server the player joined
+  // and served from this very origin, so a same-origin
+  // fetch('/api/console/exec') from a hostile page would otherwise be
+  // indistinguishable from the player typing into their own console.
+  // random_device directly rather than a seeded PRNG - this is drawn once at
+  // startup, so there is nothing to gain from a generator and a predictable
+  // seed is the whole problem.
+  {
+    std::random_device entropy;
+    std::string token;
+    token.reserve(32);
+    static constexpr char kHex[] = "0123456789abcdef";
+    for (int i = 0; i < 32; ++i) {
+      token.push_back(kHex[entropy() & 0xFu]);
+    }
+    g_admin_token = std::move(token);
+  }
+  g_admin->SetAdminToken(g_admin_token,
+                         lua_host::AdminHttpServer::AdminAccess::kTokenOnly);
   // /api/metrics: this client's own upload/download rate merged with Lua
   // resmon - the client-side twin of the dedicated server's provider (which
   // additionally has relay bandwidth/hitches, since only the relay sees
@@ -2041,7 +2068,7 @@ void Initialize() {
   // client is what keeps the two consoles separate.
   for (int offset = 0; offset < kDevConsoleAdminPortRange; ++offset) {
     const int port = kDevConsoleAdminPortBase + offset;
-    if (g_admin->Start(port)) {
+    if (g_admin->Start(port, lua_host::AdminHttpServer::Bind::kLoopbackOnly)) {
       g_admin_port = port;
       REXLOG_INFO("lua: dev console listening on http://127.0.0.1:{}", port);
       break;

@@ -306,6 +306,78 @@ std::string ReadManifestString(lua_State* L, const char* field) {
   return value;
 }
 
+
+// Strips everything in the Lua standard library that can reach the machine
+// the script is running on.
+//
+// This is not defence in depth, it is the only thing standing between a
+// player and a hostile server. A CLIENT downloads its Lua from whatever
+// server it just connected to and runs it (see
+// skate3_lua_client_natives.cpp's SyncResourcesFromServer), so on a stock
+// luaL_openlibs state any server could read, write and execute arbitrary
+// files on every player's PC the moment they joined - no exploit needed,
+// just `os.execute` in a client script. FiveM strips the same surface for
+// exactly this reason.
+//
+// Applied to server-side states too. Those run the server owner's own code,
+// so the threat model is different, but nothing shipped here needs the
+// removed functions, and a resource that silently behaves differently
+// depending on which side loaded it is worse than one that fails on both.
+//
+// Done AFTER luaL_openlibs rather than by opening a chosen subset, because
+// the libraries that survive are registered by openlibs together with
+// internals that assume their siblings were loaded.
+void RestrictStandardLibrary(lua_State* L) {
+  // Whole libraries with no subset worth keeping:
+  //   io      - arbitrary file read and write.
+  //   package - `require`, plus loadlib(), which maps any native DLL into
+  //             the process. That one function is remote code execution on
+  //             its own, and no amount of care elsewhere survives it.
+  // Globals that load code from a path or from bytecode go with them. `load`
+  // is included because it accepts precompiled chunks and the Lua bytecode
+  // verifier is not a security boundary: hand-crafted bytecode is memory
+  // corruption, not a Lua error. `loadstring` and `setfenv` do not exist in
+  // 5.4; nil-ing them costs nothing and keeps this list honest if the
+  // version ever moves.
+  static constexpr const char* kRemovedGlobals[] = {
+      "io",   "package",  "require",    "dofile",
+      "load", "loadfile", "loadstring", "setfenv"};
+  for (const char* name : kRemovedGlobals) {
+    lua_pushnil(L);
+    lua_setglobal(L, name);
+  }
+
+  // os: keep the clock, drop the machine. time/clock/date/difftime are pure
+  // information and scripts legitimately want them; everything removed here
+  // either spawns a process, deletes a file, reads the environment, or kills
+  // the game outright.
+  lua_getglobal(L, "os");
+  if (lua_istable(L, -1)) {
+    static constexpr const char* kRemovedOsFields[] = {
+        "execute", "exit", "getenv", "remove", "rename", "setlocale",
+        "tmpname"};
+    for (const char* field : kRemovedOsFields) {
+      lua_pushnil(L);
+      lua_setfield(L, -2, field);
+    }
+  }
+  lua_pop(L, 1);
+
+  // debug: traceback only, which the thread scheduler uses to report a
+  // coroutine that died. The rest of the library defeats every restriction
+  // above - debug.getregistry() alone hands back the loaded-module table
+  // that removing `package` was meant to put out of reach, and
+  // debug.setupvalue can rewrite the upvalues these natives are bound with.
+  lua_getglobal(L, "debug");
+  if (lua_istable(L, -1)) {
+    lua_newtable(L);
+    lua_getfield(L, -2, "traceback");
+    lua_setfield(L, -2, "traceback");
+    lua_setglobal(L, "debug");
+  }
+  lua_pop(L, 1);
+}
+
 }  // namespace
 
 ResourceManifest LuaScriptHost::ReadManifest(const std::string& name) const {
@@ -350,6 +422,7 @@ lua_State* LuaScriptHost::CreateResourceLuaState(const std::string& name) {
     return nullptr;
   }
   luaL_openlibs(L);
+  RestrictStandardLibrary(L);
 
   // Built-in RegisterCommand(name, fn) - upvalues: lightuserdata host,
   // resource name string.

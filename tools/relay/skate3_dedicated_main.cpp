@@ -403,6 +403,12 @@ int main(int argc, char **argv) {
     json += "}";
     return json;
   });
+  // sv_token doubles as the admin secret: a remote dashboard must send it to
+  // reach the console routes. Without it those routes answer to loopback
+  // only, so a player who joined the server cannot type into its console.
+  admin_http.SetAdminToken(
+      options.token,
+      skate3::lua_host::AdminHttpServer::AdminAccess::kLoopbackOrToken);
   skate3::dedicated::g_admin_http = &admin_http;
   admin_http.SetPlayersProvider(&skate3::dedicated::EncodePlayersJson);
   admin_http.SetPlayerNameHandler(&skate3::dedicated::HandlePlayerNameChanged);
@@ -665,7 +671,8 @@ int main(int argc, char **argv) {
       }
     }
   }
-  if (admin_http.Start(options.admin_port)) {
+  if (admin_http.Start(options.admin_port,
+                       skate3::lua_host::AdminHttpServer::Bind::kAllInterfaces)) {
     std::printf("skate3-dedicated: dev console listening on http://127.0.0.1:%d\n",
                options.admin_port);
   } else {
