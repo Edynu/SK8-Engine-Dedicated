@@ -1,3 +1,78 @@
+# Dedicated server fork
+
+This is a dedicated-server fork, mostly slopped together by AI with minimal
+human intervention. It is something I let run in the background.
+
+A few friends and I wanted to play Skate 3 together properly - S.K.A.T.E,
+best trick on a spot, that sort of thing - so this fork exists to make that
+work. We added **Lua** and **CEF** in a similar way to how FiveM uses them, so
+we can change things quickly and optimise the networking without having to
+rebuild the client every time. There is still no shared collision; players
+skate through each other.
+
+Most of the work so far has gone into bandwidth. By changing the
+interpolation, sending fewer bones, lowering precision where it is not
+visible, and gluing the wheels to the trucks, two players went from about
+**120 KB/s down to roughly 25 KB/s**. Face bones now update only on keyframes,
+finger bones only a few times a second, and a distance-based fidelity system
+lowers the update rate for players who are further away.
+
+There are also some fair-play edits: menu cleanup, all clothing unlocked
+(currently buggy), and the cheat and difficulty options removed because
+difficulty is set by the server.
+
+I am not publishing built libraries or releases - this is source only. Feel
+free to open a pull request if you add natives or fix mistakes. It is a
+passion project, nothing serious.
+
+## What is new in this fork, and why
+
+**Dedicated server instead of peer-to-peer.** The original multiplayer
+replicated directly between Steam peers. This fork runs a real dedicated
+server that owns the session: role assignment, player identity, routing
+buckets, who can see whom, and appearance storage. Player *movement* stays
+client-authoritative - clients send their own pose and the server forwards it -
+because the skater physics belong to the game, not to us.
+
+**Steam removed entirely.** `steam_api64.dll` and the Steam P2P transport are
+gone; sessions only go through the dedicated server. As a side effect this
+exposed a frame-time regression: Steam had been holding the Windows timer
+resolution down, and without it the pacer's `Sleep(1)` ran at 15 ms instead of
+1 ms. The engine now requests high-resolution timing itself.
+
+**Networking rewritten for bandwidth.** The animation stream is the bulk of
+the traffic, so most of the work is there:
+
+- One broadcast stream instead of one encoding per recipient. The old
+  per-recipient streams carried independent sequence numbers that collided in
+  the receiver's packet window, which made late-joining players render as dark
+  boxes.
+- Appearances are held by the server and fetched on demand, replacing a
+  peer-to-peer chunk transfer that ran on the sender's schedule and usually
+  arrived before a joining player could accept it.
+- Duplicate skeleton data removed, wheels composed from their truck, and the
+  scale discarded where the decomposition allows it.
+- Rates are configurable per server in `server.cfg`: `high_hz`, `medium_hz`,
+  `low_hz` per distance band, plus `pose_hz`, `hands_hz` and `face_hz`.
+
+**Lua, FiveM-style.** Client and server resources with `RegisterCommand`,
+events, state bags and a native surface that now covers entity and player
+coordinates, synced props, and a scriptable camera (`CreateCam`, `MoveCam`,
+`LookAtCam`, `SetCamActive`). Server-side natives cover the player list,
+routing buckets, names and convars. Server resources are fetched by the client
+on connect, so a game mode lives on the server.
+
+**CEF.** An in-game developer console and a web dashboard for the server -
+players, resource monitor, bandwidth and hitch metrics - so a running session
+can be inspected and changed without a rebuild.
+
+**Client cleanup for fair play.** The World and Maps settings categories are
+hidden, System is trimmed to language and close, and Multiplayer only shows
+the session status and a leave button while connected. The free camera and
+object spawner are no longer bound to keys for players; the camera is exposed
+to Lua instead so a game mode can drive it. Floating name tags are drawn
+natively over other players.
+
 # Skate 3 Custom Engine Layer
 
 > **New here?** Download the

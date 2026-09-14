@@ -71,17 +71,6 @@ namespace protocol_v12 = skate3::multiplayer::protocol_v12;
 constexpr std::uint64_t kStaleTimeoutMicroseconds = 10'000'000;
 constexpr std::uint64_t kSweepIntervalMicroseconds = 1'000'000;
 
-// Defined below with the player registry; declared here because the
-// connection handler above it raises playerConnecting.
-void RaisePlayerEvent(const char *event, std::uint32_t player_id);
-
-std::uint64_t NowMicroseconds() {
-  return static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
-}
-
 std::uint64_t Fnv1a64(std::string_view text) {
   std::uint64_t hash = 1469598103934665603ull;
   for (const unsigned char value : text) {
@@ -266,7 +255,7 @@ void HandleRegister(SocketHandle socket_handle, VisualRelayRouter &router,
               static_cast<unsigned long long>(request.requested_map_hash));
   // Accepted onto the server, but not yet in the world - scripts get a
   // chance to set up per-player state before the player can be seen.
-  RaisePlayerEvent("playerConnecting", role);
+  skate3::dedicated::RaisePlayerEvent("playerConnecting", role);
 }
 
 // Server-side view of who is connected and where they are.
@@ -279,493 +268,6 @@ void HandleRegister(SocketHandle socket_handle, VisualRelayRouter &router,
 //
 // Keyed by role - the same id events carry as `source` and the client
 // reports from GetPlayerId(), so an event handler can look up its sender.
-class PlayerRegistry {
-public:
-  struct Player {
-    std::uint32_t id = 0;
-    float x = 0.0f;
-    float y = 0.0f;
-    float z = 0.0f;
-    bool position_valid = false;
-    std::uint64_t map_hash = 0;
-    std::uint32_t bucket = 0;
-    std::string name;
-    std::uint64_t last_seen_us = 0;
-  };
-
-  void Publish(const std::vector<RelayPeer> &peers) {
-    std::vector<Player> next;
-    next.reserve(peers.size());
-    for (const auto &peer : peers) {
-      next.push_back({.id = peer.role,
-                      .x = peer.x,
-                      .y = peer.y,
-                      .z = peer.z,
-                      .position_valid = peer.position_valid,
-                      .map_hash = peer.map_hash,
-                      .bucket = peer.bucket,
-                      .name = peer.name,
-                      .last_seen_us = peer.last_seen_us});
-    }
-    std::lock_guard<std::mutex> lock(mutex_);
-    players_ = std::move(next);
-  }
-
-  [[nodiscard]] std::vector<Player> All() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return players_;
-  }
-
-  [[nodiscard]] std::optional<Player> Find(std::uint32_t id) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto &player : players_) {
-      if (player.id == id) {
-        return player;
-      }
-    }
-    return std::nullopt;
-  }
-
-private:
-  mutable std::mutex mutex_;
-  std::vector<Player> players_;
-};
-
-PlayerRegistry g_players;
-
-
-// The script host, so relay-loop lifecycle can raise script events. Set once
-// in main before the loop starts.
-skate3::lua_host::LuaScriptHost *g_script_host = nullptr;
-
-// Raises a server-side event with a single integer argument. Used for the
-// player lifecycle, whose payload is always just an id.
-void RaisePlayerEvent(const char *event, std::uint32_t player_id) {
-  if (g_script_host == nullptr) {
-    return;
-  }
-  // Dispatched as a network event so resources must opt in with
-  // RegisterNetEvent, the same as any other event they do not raise
-  // themselves. `source` carries the id as well, matching FiveM.
-  g_script_host->DispatchNetworkEvent(
-      event, "[" + std::to_string(player_id) + "]",
-      static_cast<int>(player_id));
-}
-
-// Which players are currently within each other's interest radius. Scope
-// transitions are edge-triggered off this, so a pair produces one
-// playerEnteredScope and later one playerLeftScope, not an event per tick.
-class ScopeTracker {
-public:
-  // Recomputes every pair and raises the transitions. `radius` of 0 means
-  // unlimited, in which case everyone on the same map is in scope.
-  void Update(const std::vector<PlayerRegistry::Player> &players,
-              float radius) {
-    std::set<std::pair<std::uint32_t, std::uint32_t>> current;
-    for (const auto &observer : players) {
-      for (const auto &target : players) {
-        if (observer.id == target.id || observer.map_hash != target.map_hash) {
-          continue;
-        }
-        if (radius > 0.0f && observer.position_valid && target.position_valid) {
-          const float dx = target.x - observer.x;
-          const float dy = target.y - observer.y;
-          const float dz = target.z - observer.z;
-          if (dx * dx + dy * dy + dz * dz > radius * radius) {
-            continue;
-          }
-        }
-        current.insert({observer.id, target.id});
-      }
-    }
-    for (const auto &pair : current) {
-      if (!in_scope_.contains(pair)) {
-        RaiseScopeEvent("playerEnteredScope", pair.first, pair.second);
-      }
-    }
-    for (const auto &pair : in_scope_) {
-      if (!current.contains(pair)) {
-        RaiseScopeEvent("playerLeftScope", pair.first, pair.second);
-      }
-    }
-    in_scope_ = std::move(current);
-  }
-
-  // A disconnect removes every pair the player was part of, without
-  // reporting a scope exit for each - playerDropped already covers it, and
-  // firing both would make handlers double-count.
-  void Forget(std::uint32_t player_id) {
-    for (auto it = in_scope_.begin(); it != in_scope_.end();) {
-      it = (it->first == player_id || it->second == player_id)
-               ? in_scope_.erase(it)
-               : std::next(it);
-    }
-  }
-
-private:
-  static void RaiseScopeEvent(const char *event, std::uint32_t observer,
-                              std::uint32_t target) {
-    if (g_script_host == nullptr) {
-      return;
-    }
-    // {forPlayer, player} - "player entered forPlayer's scope", matching
-    // the shape of FiveM's own scope events.
-    g_script_host->DispatchNetworkEvent(
-        event, "[" + std::to_string(observer) + "," + std::to_string(target) + "]",
-        static_cast<int>(observer));
-  }
-
-  std::set<std::pair<std::uint32_t, std::uint32_t>> in_scope_;
-};
-
-ScopeTracker g_scopes;
-
-// Names are client-provided (unlike everything else this relay routes),
-// so unlike the rest of this file's hand-rolled JSON encoding this one
-// actually has to escape its input.
-std::string EscapeJsonString(std::string_view text) {
-  std::string escaped;
-  escaped.reserve(text.size());
-  for (const char c : text) {
-    if (c == '"' || c == '\\') {
-      escaped.push_back('\\');
-    }
-    escaped.push_back(c);
-  }
-  return escaped;
-}
-
-// Dashboard's Active Players page (GET /api/players via
-// AdminHttpServer::SetPlayersProvider) - the same registry, encoded as JSON
-// instead of pushed onto a Lua stack.
-std::string EncodePlayersJson() {
-  std::string json = "[";
-  bool first = true;
-  const std::uint64_t now = NowMicroseconds();
-  for (const auto &player : g_players.All()) {
-    if (!first) {
-      json += ",";
-    }
-    first = false;
-    char map_hash[24];
-    std::snprintf(map_hash, sizeof(map_hash), "%016llx",
-                 static_cast<unsigned long long>(player.map_hash));
-    // pingMs is really "time since last datagram" - this relay never
-    // measures round-trip latency, so it is the closest honest substitute
-    // and at least tells the dashboard a connection is alive and recent.
-    const double idle_ms =
-        player.last_seen_us <= now
-            ? static_cast<double>(now - player.last_seen_us) / 1000.0
-            : 0.0;
-    json += "{\"id\":" + std::to_string(player.id) +
-           ",\"name\":\"" + EscapeJsonString(player.name) + "\"" +
-           ",\"valid\":" + (player.position_valid ? "true" : "false") +
-           ",\"x\":" + std::to_string(player.x) +
-           ",\"y\":" + std::to_string(player.y) +
-           ",\"z\":" + std::to_string(player.z) + ",\"mapHash\":\"" +
-           map_hash + "\",\"bucket\":" + std::to_string(player.bucket) +
-           ",\"idleMs\":" + std::to_string(idle_ms) + "}";
-  }
-  json += "]";
-  return json;
-}
-
-void PushPlayerTable(lua_State *L, const PlayerRegistry::Player &player) {
-  lua_newtable(L);
-  lua_pushinteger(L, player.id);
-  lua_setfield(L, -2, "id");
-  lua_pushstring(L, player.name.c_str());
-  lua_setfield(L, -2, "name");
-  lua_pushboolean(L, player.position_valid ? 1 : 0);
-  lua_setfield(L, -2, "valid");
-  if (player.position_valid) {
-    lua_pushnumber(L, player.x);
-    lua_setfield(L, -2, "x");
-    lua_pushnumber(L, player.y);
-    lua_setfield(L, -2, "y");
-    lua_pushnumber(L, player.z);
-    lua_setfield(L, -2, "z");
-  }
-  // Lua numbers are doubles; a 64-bit hash is handed over as hex text so it
-  // survives the trip intact and can be compared for equality.
-  char map_hash[24];
-  std::snprintf(map_hash, sizeof(map_hash), "%016llx",
-                static_cast<unsigned long long>(player.map_hash));
-  lua_pushstring(L, map_hash);
-  lua_setfield(L, -2, "mapHash");
-  lua_pushinteger(L, player.bucket);
-  lua_setfield(L, -2, "bucket");
-}
-
-// The live router, so bucket natives can reach it. Only touched from the
-// relay thread and from natives, which the queue below serialises.
-VisualRelayRouter *g_router = nullptr;
-
-// So the player-name HTTP handler can broadcast, from whatever thread
-// Defined with the reliable-channel helpers below, but needed here.
-void QueueClientScriptEvent(std::uint16_t role, const std::string &event,
-                            const std::string &json_args);
-
-// httplib calls it on - QueueClientEvent has its own internal locking and
-// is safe to call from any thread, unlike the router.
-skate3::lua_host::AdminHttpServer *g_admin_http = nullptr;
-// Set once the store is constructed in main; the disconnect path below uses
-// it to stop advertising an appearance nobody is wearing any more.
-skate3::appearance_store::AppearanceStore *g_appearance_store = nullptr;
-
-// Who `viewer_role` can currently see, and what each of them is wearing.
-//
-// This is the server deciding visibility rather than the client filtering a
-// global list, and it deliberately applies the SAME rules the packet router
-// applies in RouteRaw: same map, same routing bucket, and within sv_radius.
-// A peer the relay would not forward packets from is a peer whose appearance
-// this viewer has no business downloading.
-//
-// Reads the PlayerRegistry snapshot, not the router: the relay loop mutates
-// the router on its own thread and this runs on an HTTP worker.
-//
-// Peers with no stored appearance are omitted - there is nothing to fetch,
-// and leaving them out keeps them from perturbing the version hash.
-struct VisiblePeer {
-  std::uint32_t role = 0;
-  std::uint64_t appearance_id = 0;
-  std::string name;
-};
-
-[[nodiscard]] std::vector<VisiblePeer> VisibleAppearances(
-    std::uint32_t viewer_role, float radius) {
-  std::vector<VisiblePeer> visible;
-  if (viewer_role == 0 || g_appearance_store == nullptr) {
-    return visible;
-  }
-  const auto viewer = g_players.Find(viewer_role);
-  if (!viewer.has_value()) {
-    return visible;
-  }
-  std::unordered_map<std::uint32_t, std::uint64_t> worn;
-  for (const auto &entry : g_appearance_store->Roster()) {
-    worn[entry.role] = entry.appearance_id;
-  }
-  for (const auto &player : g_players.All()) {
-    if (player.id == viewer_role || player.map_hash != viewer->map_hash ||
-        player.bucket != viewer->bucket) {
-      continue;
-    }
-    if (radius > 0.0f && player.position_valid && viewer->position_valid) {
-      const float dx = player.x - viewer->x;
-      const float dy = player.y - viewer->y;
-      const float dz = player.z - viewer->z;
-      if (dx * dx + dy * dy + dz * dz > radius * radius) {
-        continue;
-      }
-    }
-    const auto found = worn.find(player.id);
-    const std::uint64_t appearance_id =
-        found == worn.end() ? 0 : found->second;
-    if (appearance_id == 0 && player.name.empty()) {
-      continue;  // nothing to say about this peer yet.
-    }
-    // The NAME rides here too, not just the appearance. It used to reach
-    // clients only as a one-shot "skate3:playerNamed" script event, so a
-    // client that was not listening at that instant showed a role number
-    // ("Player 3") for the rest of the session with nothing to correct it.
-    // This answer is re-sent whenever it changes and is scoped to peers the
-    // viewer can see, which is exactly the same guarantee appearances get.
-    visible.push_back({.role = player.id,
-                       .appearance_id = appearance_id,
-                       .name = player.name});
-  }
-  // Sorted so the hash below depends on the CONTENT of the answer and not on
-  // the order the registry happened to hand the players over.
-  std::sort(visible.begin(), visible.end(),
-            [](const auto &left, const auto &right) {
-              return left.role < right.role;
-            });
-  return visible;
-}
-
-// FNV-1a over the (role, appearance) pairs. Serves as the long-poll version:
-// equal hash means this viewer's answer has not changed, whatever else moved
-// in the world.
-[[nodiscard]] std::uint64_t HashAppearanceRoster(
-    const std::vector<VisiblePeer> &roster) {
-  std::uint64_t hash = 1469598103934665603ull;
-  const auto mix = [&hash](std::uint64_t value) {
-    for (int byte = 0; byte < 8; ++byte) {
-      hash ^= (value >> (byte * 8)) & 0xFFull;
-      hash *= 1099511628211ull;
-    }
-  };
-  for (const auto &entry : roster) {
-    mix(entry.role);
-    mix(entry.appearance_id);
-    for (const char character : entry.name) {
-      mix(static_cast<std::uint64_t>(static_cast<unsigned char>(character)));
-    }
-  }
-  // Never collide with "caller has seen nothing yet".
-  return hash == 0 ? 1 : hash;
-}
-
-// Bucket changes are requested from script threads but applied on the relay
-// thread, since the router is not thread-safe.
-std::mutex g_bucket_mutex;
-std::vector<std::pair<std::uint32_t, std::uint32_t>> g_pending_buckets;
-
-// Same reasoning, for names: SetName touches the router, which is only
-// safe to mutate from the relay thread, but the HTTP handler that learns a
-// new name runs on an httplib worker thread.
-std::mutex g_name_mutex;
-std::vector<std::pair<std::uint32_t, std::string>> g_pending_names;
-
-// Wraps one JSON string field, e.g. NameField("Edynu") -> "\"Edynu\"".
-std::string JsonString(std::string_view text) {
-  return "\"" + EscapeJsonString(text) + "\"";
-}
-
-// POST /api/players/name's handler (AdminHttpServer::SetPlayerNameHandler).
-// Runs on an httplib worker thread. Queues the actual router mutation for
-// the relay thread, then does two things that need no such deferral:
-//   1. tells every OTHER connected client this player's name, so anyone
-//      already in the world learns it immediately ("first notice");
-//   2. tells the NEWLY-named player everyone else's already-known names,
-//      so they do not have to wait for each of those players to happen to
-//      rename themselves again to learn who is already there.
-void HandlePlayerNameChanged(int player_id, std::string_view name) {
-  const auto role = static_cast<std::uint32_t>(player_id);
-
-  // De-duplicated against every OTHER currently-connected name, so two
-  // connections presenting the same identity - the common case testing
-  // solo, two clients launched from the same .bat with the same
-  // PLAYER_NAME - read as distinct people instead of two players both
-  // silently named "Edynu" (which is what a nameplate fell back to
-  // showing: a role number, because nothing else distinguished them).
-  // Grows the suffix until unique rather than stopping at "(2)", so a
-  // third or fourth identical connection still gets a real name instead
-  // of colliding with the one "(2)" already claimed.
-  std::string final_name(name);
-  {
-    int suffix = 2;
-    bool collided;
-    do {
-      collided = false;
-      for (const auto &player : g_players.All()) {
-        if (player.id != role && player.name == final_name) {
-          collided = true;
-          break;
-        }
-      }
-      if (collided) {
-        final_name = std::string(name) + "(" + std::to_string(suffix) + ")";
-        ++suffix;
-      }
-    } while (collided);
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(g_name_mutex);
-    g_pending_names.push_back({role, final_name});
-  }
-  const std::string self_id = std::to_string(player_id);
-  // On the reliable channel like every other script event - the HTTP event
-  // feed these used to ride no longer has any subscribers.
-  QueueClientScriptEvent(protocol_v12::kReliableBroadcastRole,
-                         "skate3:playerNamed",
-                         "[" + self_id + "," + JsonString(final_name) + "]");
-
-  std::string roster = "[[";
-  bool first = true;
-  for (const auto &player : g_players.All()) {
-    if (player.id == role || player.name.empty()) {
-      continue;
-    }
-    if (!first) {
-      roster += ",";
-    }
-    first = false;
-    roster += "{\"id\":" + std::to_string(player.id) + ",\"name\":" +
-             JsonString(player.name) + "}";
-  }
-  roster += "]]";
-  if (!first) {
-    QueueClientScriptEvent(static_cast<std::uint16_t>(role),
-                           "skate3:playerRoster", roster);
-  }
-}
-
-// SetPlayerRoutingBucket(id, bucket) -> queue a move into another instance.
-int Lua_SetPlayerRoutingBucket(lua_State *L) {
-  const auto id = static_cast<std::uint32_t>(luaL_checkinteger(L, 1));
-  const auto bucket = static_cast<std::uint32_t>(luaL_checkinteger(L, 2));
-  std::lock_guard<std::mutex> lock(g_bucket_mutex);
-  g_pending_buckets.push_back({id, bucket});
-  return 0;
-}
-
-// GetPlayerRoutingBucket(id) -> the bucket that player is currently in.
-int Lua_GetPlayerRoutingBucket(lua_State *L) {
-  const auto id = static_cast<std::uint32_t>(luaL_checkinteger(L, 1));
-  const auto player = g_players.Find(id);
-  lua_pushinteger(L, player ? player->bucket : 0);
-  return 1;
-}
-
-// GetPlayerName(id) -> that player's self-reported name, or "" if they
-// have not sent one yet (e.g. a client too old to know about
-// POST /api/players/name, or one that has not connected long enough to).
-int Lua_GetPlayerName(lua_State *L) {
-  const auto id = static_cast<std::uint32_t>(luaL_checkinteger(L, 1));
-  const auto player = g_players.Find(id);
-  lua_pushstring(L, player ? player->name.c_str() : "");
-  return 1;
-}
-
-// GetSkaters() -> array of connected player ids.
-// Set once the config is parsed, so the native below can answer without the
-// options struct being threaded through every call site.
-const std::unordered_map<std::string, std::string>* g_convars = nullptr;
-
-// GetConvar(name [, default]) -> string
-//
-// Any "key value" line in server.cfg that is not one of the server's own
-// directives. This is how a game mode reads its own settings - game_difficulty,
-// for instance - without the server needing to know what they mean.
-int Lua_GetConvar(lua_State* L) {
-  const char* name = luaL_checkstring(L, 1);
-  const char* fallback = luaL_optstring(L, 2, "");
-  if (g_convars != nullptr) {
-    const auto found = g_convars->find(name);
-    if (found != g_convars->end()) {
-      lua_pushstring(L, found->second.c_str());
-      return 1;
-    }
-  }
-  lua_pushstring(L, fallback);
-  return 1;
-}
-
-int Lua_GetSkaters(lua_State *L) {
-  lua_newtable(L);
-  int index = 1;
-  for (const auto &player : g_players.All()) {
-    lua_pushinteger(L, player.id);
-    lua_rawseti(L, -2, index++);
-  }
-  return 1;
-}
-
-// GetSkater(id) -> table describing that player, or nil if not connected.
-int Lua_GetSkater(lua_State *L) {
-  const auto id = static_cast<std::uint32_t>(luaL_checkinteger(L, 1));
-  const auto player = g_players.Find(id);
-  if (!player) {
-    lua_pushnil(L);
-    return 1;
-  }
-  PushPlayerTable(L, *player);
-  return 1;
-}
-
 // ---------------------------------------------------------------------
 // Script events over the reliable channel
 //
@@ -774,206 +276,6 @@ int Lua_GetSkater(lua_State *L) {
 // to the Lua host; anything the host sends back is originated here. Events
 // never travel client-to-client, because the server is the authority on who
 // should receive what.
-// ---------------------------------------------------------------------
-
-struct ScriptEventPeer {
-  skate3::multiplayer::ReliableSender sender;
-  skate3::multiplayer::ReliableReceiver receiver;
-  std::uint32_t sequence = 0;
-  bool ack_due = false;
-};
-
-using ScriptEventPeers = std::unordered_map<std::uint64_t, ScriptEventPeer>;
-
-// Queued by TriggerClientEvent on a script thread, drained by the relay
-// thread that owns the channels. `role` is kReliableBroadcastRole for
-// "every client".
-struct PendingClientEvent {
-  std::uint16_t role = 0;
-  std::vector<std::uint8_t> message;
-};
-
-std::mutex g_client_event_mutex;
-std::deque<PendingClientEvent> g_client_events;
-
-void QueueClientScriptEvent(std::uint16_t role, const std::string &event,
-                            const std::string &json_args) {
-  std::vector<std::uint8_t> message;
-  if (!protocol_v12::EncodeScriptEventMessage(event, json_args, message)) {
-    return;
-  }
-  std::lock_guard<std::mutex> lock(g_client_event_mutex);
-  g_client_events.push_back({role, std::move(message)});
-}
-
-// The server is not a peer and holds no role of its own, so outbound
-// envelopes carry a placeholder that only has to satisfy EnvelopeShapeValid.
-// Clients identify these purely by kind and by the fact that they arrived
-// from the server's address.
-constexpr std::uint16_t kServerSenderRole = 1;
-constexpr std::uint32_t kServerSessionId = 1;
-
-std::uint32_t RoleForConnection(const VisualRelayRouter &router,
-                                std::uint64_t connection_id) {
-  for (const auto &peer : router.Peers()) {
-    if (peer.connection_id == connection_id) {
-      return peer.role;
-    }
-  }
-  return 0;
-}
-
-void SendScriptDatagram(SocketHandle relay_socket, const sockaddr_in &address,
-                        const std::uint8_t *bytes, std::size_t byte_count) {
-  sendto(relay_socket, reinterpret_cast<const char *>(bytes),
-         static_cast<int>(byte_count), 0,
-         reinterpret_cast<const sockaddr *>(&address), sizeof(address));
-  skate3::dedicated::metrics::RecordSend(byte_count);
-}
-
-void SendScriptEventAck(SocketHandle relay_socket, const sockaddr_in &address,
-                        ScriptEventPeer &peer, std::uint64_t now_us) {
-  const protocol_v12::ReliableAck ack =
-      peer.receiver.BuildAck(protocol_v12::kReliableChannelScriptEvent);
-  protocol_v12::Envelope envelope;
-  envelope.kind = protocol_v12::MessageKind::kReliableAck;
-  envelope.flags = protocol_v12::kFlagReliable;
-  envelope.payload_bytes = protocol_v12::kReliableAckPayloadBytes;
-  envelope.sender_role = kServerSenderRole;
-  envelope.stream_id = protocol_v12::kReliableChannelScriptEvent;
-  envelope.sender_session = kServerSessionId;
-  envelope.sequence = ++peer.sequence;
-  envelope.sender_time_us = now_us;
-  std::array<std::uint8_t, protocol_v12::kEnvelopeBytes +
-                               protocol_v12::kReliableAckPayloadBytes>
-      packet{};
-  if (protocol_v12::EncodeReliableAckDatagram(envelope, ack, packet)) {
-    SendScriptDatagram(relay_socket, address, packet.data(), packet.size());
-  }
-}
-
-void HandleScriptEventPacket(ScriptEventPeers &peers,
-                             skate3::lua_host::LuaScriptHost &host,
-                             const VisualRelayRouter &router,
-                             std::uint64_t connection_id,
-                             std::span<const std::uint8_t> packet,
-                             const protocol_v12::Envelope &envelope) {
-  ScriptEventPeer &peer = peers[connection_id];
-  if (envelope.kind == protocol_v12::MessageKind::kReliableAck) {
-    protocol_v12::Envelope ack_envelope;
-    protocol_v12::ReliableAck ack;
-    if (protocol_v12::DecodeReliableAckDatagram(packet, ack_envelope, ack) &&
-        ack.channel == protocol_v12::kReliableChannelScriptEvent) {
-      peer.sender.Acknowledge(ack);
-    }
-    return;
-  }
-
-  protocol_v12::Envelope stream_envelope;
-  protocol_v12::ReliableHeader header;
-  std::span<const std::uint8_t> fragment;
-  if (!protocol_v12::DecodeReliableDatagram(packet, stream_envelope, header,
-                                            fragment) ||
-      stream_envelope.stream_id !=
-          protocol_v12::kReliableChannelScriptEvent) {
-    return;
-  }
-  std::vector<std::vector<std::uint8_t>> delivered;
-  peer.receiver.Accept(header, fragment, delivered);
-  // Acknowledged even for a duplicate: a duplicate means our previous ack
-  // was what went missing, so silence would loop forever.
-  peer.ack_due = true;
-
-  // The sender's identity comes from the ROUTER, not the envelope: a client
-  // may claim any role it likes in a datagram it wrote itself, and `source`
-  // is what server scripts authorise on.
-  const std::uint32_t role = RoleForConnection(router, connection_id);
-  if (role == 0) {
-    return;  // not a registered connection; nothing to attribute this to.
-  }
-  for (const std::vector<std::uint8_t> &message : delivered) {
-    std::string event;
-    std::string json_args;
-    if (!protocol_v12::DecodeScriptEventMessage(message, event, json_args)) {
-      continue;
-    }
-    if (host.TryApplyStateBagEvent(event, json_args)) {
-      continue;
-    }
-    host.DispatchNetworkEvent(event, json_args, static_cast<int>(role));
-  }
-}
-
-void DrainScriptEvents(SocketHandle relay_socket, ScriptEventPeers &peers,
-                       const VisualRelayRouter &router,
-                       const std::unordered_map<std::uint64_t, sockaddr_in>
-                           &addresses,
-                       std::uint64_t now_us) {
-  // Hand anything scripts queued to the right per-connection sender.
-  std::deque<PendingClientEvent> pending;
-  {
-    std::lock_guard<std::mutex> lock(g_client_event_mutex);
-    pending.swap(g_client_events);
-  }
-  if (!pending.empty()) {
-    const auto connected = router.Peers();
-    for (PendingClientEvent &entry : pending) {
-      for (const auto &peer : connected) {
-        const bool addressed =
-            entry.role == protocol_v12::kReliableBroadcastRole ||
-            peer.role == entry.role;
-        if (!addressed) {
-          continue;
-        }
-        // Copied per recipient: each connection's channel owns its own
-        // retransmit state and may still be resending long after another
-        // has acknowledged.
-        peers[peer.connection_id].sender.Queue(entry.message, peer.role);
-      }
-    }
-  }
-
-  for (auto entry = peers.begin(); entry != peers.end();) {
-    const auto address = addresses.find(entry->first);
-    if (address == addresses.end()) {
-      entry = peers.erase(entry);  // connection gone; drop its channel.
-      continue;
-    }
-    ScriptEventPeer &peer = entry->second;
-    std::vector<skate3::multiplayer::ReliableOutboundFragment> fragments;
-    peer.sender.Collect(now_us, fragments);
-    for (const auto &fragment : fragments) {
-      const std::uint16_t fragment_bytes =
-          protocol_v12::ReliableFragmentByteCount(
-              fragment.header.total_bytes, fragment.header.fragment_index);
-      protocol_v12::Envelope envelope;
-      envelope.kind = protocol_v12::MessageKind::kReliableStream;
-      envelope.flags = protocol_v12::kFlagReliable;
-      envelope.payload_bytes =
-          protocol_v12::kReliableHeaderBytes + fragment_bytes;
-      envelope.sender_role = kServerSenderRole;
-      envelope.stream_id = protocol_v12::kReliableChannelScriptEvent;
-      envelope.sender_session = kServerSessionId;
-      envelope.sequence = ++peer.sequence;
-      envelope.sender_time_us = now_us;
-      std::array<std::uint8_t, protocol_v12::kMaximumDatagramBytes> packet{};
-      const std::size_t packet_bytes =
-          protocol_v12::kEnvelopeBytes + envelope.payload_bytes;
-      if (protocol_v12::EncodeReliableDatagram(
-              envelope, fragment.header, fragment.payload,
-              std::span<std::uint8_t>(packet).first(packet_bytes))) {
-        SendScriptDatagram(relay_socket, address->second, packet.data(),
-                           packet_bytes);
-      }
-    }
-    if (peer.ack_due) {
-      SendScriptEventAck(relay_socket, address->second, peer, now_us);
-      peer.ack_due = false;
-    }
-    ++entry;
-  }
-}
-
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1062,28 +364,28 @@ int main(int argc, char **argv) {
 
   VisualRelayRouter router;
   RoleAllocator roles;
-  ScriptEventPeers script_peers;
+  skate3::dedicated::ScriptEventPeers script_peers;
   std::unordered_map<std::uint64_t, sockaddr_in> addresses;
   std::vector<std::uint8_t> receive_buffer(protocol_v12::kMaximumDatagramBytes);
-  std::uint64_t last_sweep_us = NowMicroseconds();
+  std::uint64_t last_sweep_us = skate3::dedicated::NowMicroseconds();
 
   skate3::lua_host::LuaScriptHost script_host(options.resources_dir,
                                               skate3::lua_host::Side::kServer);
   script_host.DiscoverResources();
-  g_script_host = &script_host;
-  g_router = &router;
+  skate3::dedicated::SetScriptHost(&script_host);
+  skate3::dedicated::g_router = &router;
   // Connections that have sent at least one presence beacon, i.e. are in
   // the world rather than merely accepted.
   std::set<std::uint64_t> joined;
-  g_convars = &options.convars;
-  script_host.RegisterNative("GetConvar", &Lua_GetConvar);
-  script_host.RegisterNative("GetSkaters", &Lua_GetSkaters);
-  script_host.RegisterNative("GetSkater", &Lua_GetSkater);
+  skate3::dedicated::g_convars = &options.convars;
+  script_host.RegisterNative("GetConvar", &skate3::dedicated::Lua_GetConvar);
+  script_host.RegisterNative("GetSkaters", &skate3::dedicated::Lua_GetSkaters);
+  script_host.RegisterNative("GetSkater", &skate3::dedicated::Lua_GetSkater);
   script_host.RegisterNative("SetPlayerRoutingBucket",
-                             &Lua_SetPlayerRoutingBucket);
+                             &skate3::dedicated::Lua_SetPlayerRoutingBucket);
   script_host.RegisterNative("GetPlayerRoutingBucket",
-                             &Lua_GetPlayerRoutingBucket);
-  script_host.RegisterNative("GetPlayerName", &Lua_GetPlayerName);
+                             &skate3::dedicated::Lua_GetPlayerRoutingBucket);
+  script_host.RegisterNative("GetPlayerName", &skate3::dedicated::Lua_GetPlayerName);
   skate3::lua_host::AdminHttpServer admin_http(script_host, "web-console");
   admin_http.SetSettingsProvider([&options]() {
     // Only what a client needs in order to enforce a rule; the rest of
@@ -1101,9 +403,9 @@ int main(int argc, char **argv) {
     json += "}";
     return json;
   });
-  g_admin_http = &admin_http;
-  admin_http.SetPlayersProvider(&EncodePlayersJson);
-  admin_http.SetPlayerNameHandler(&HandlePlayerNameChanged);
+  skate3::dedicated::g_admin_http = &admin_http;
+  admin_http.SetPlayersProvider(&skate3::dedicated::EncodePlayersJson);
+  admin_http.SetPlayerNameHandler(&skate3::dedicated::HandlePlayerNameChanged);
 
   // Server-held player appearances. Clients upload once and peers fetch on
   // demand, replacing a peer-to-peer UDP fanout that cost O(peers) per
@@ -1134,7 +436,7 @@ int main(int argc, char **argv) {
                       role,
                       static_cast<unsigned long long>(appearance_id), size,
                       appearance_store.StoredBlobs());
-          RaisePlayerEvent("playerAppearanceChanged", role);
+          skate3::dedicated::RaisePlayerEvent("playerAppearanceChanged", role);
         }
         return true;
       },
@@ -1153,11 +455,11 @@ int main(int argc, char **argv) {
         constexpr auto kWaitBudget = std::chrono::seconds(20);
         constexpr auto kReevaluate = std::chrono::milliseconds(200);
         const auto deadline = std::chrono::steady_clock::now() + kWaitBudget;
-        std::vector<VisiblePeer> visible;
+        std::vector<skate3::dedicated::VisiblePeer> visible;
         std::uint64_t version = 0;
         for (;;) {
-          visible = VisibleAppearances(viewer_role, radius);
-          version = HashAppearanceRoster(visible);
+          visible = skate3::dedicated::VisibleAppearances(viewer_role, radius);
+          version = skate3::dedicated::HashAppearanceRoster(visible);
           if (!wait || version != since ||
               std::chrono::steady_clock::now() >= deadline) {
             break;
@@ -1177,11 +479,11 @@ int main(int argc, char **argv) {
                         static_cast<unsigned long long>(entry.appearance_id));
           json += "{\"role\":" + std::to_string(entry.role) +
                   ",\"id\":\"" + id_text + "\",\"name\":" +
-                  JsonString(entry.name) + "}";
+                  skate3::dedicated::JsonString(entry.name) + "}";
         }
         return json + "]}";
       });
-  g_appearance_store = &appearance_store;
+  skate3::dedicated::g_appearance_store = &appearance_store;
 
   // Networked world props. Placement is rare and small; the traffic that
   // matters is the streaming query, which every client makes about once a
@@ -1344,7 +646,7 @@ int main(int argc, char **argv) {
           }
           role = static_cast<std::uint16_t>(parsed);
         }
-        QueueClientScriptEvent(role, event, json_args);
+        skate3::dedicated::QueueClientScriptEvent(role, event, json_args);
       });
   // server.cfg's ensure lines decide what runs. With none declared, every
   // discovered resource starts - convenient for local development, and the
@@ -1377,7 +679,7 @@ int main(int argc, char **argv) {
     // is deliberate idle throttling, not work, and including it would make
     // every quiet iteration read as a near-hitch and bury real ones under
     // noise.
-    const std::uint64_t iteration_start_us = NowMicroseconds();
+    const std::uint64_t iteration_start_us = skate3::dedicated::NowMicroseconds();
     sockaddr_in sender{};
 #if defined(_WIN32)
     int sender_length = sizeof(sender);
@@ -1388,7 +690,7 @@ int main(int argc, char **argv) {
         recvfrom(relay_socket, reinterpret_cast<char *>(receive_buffer.data()),
                 static_cast<int>(receive_buffer.size()), 0,
                 reinterpret_cast<sockaddr *>(&sender), &sender_length);
-    const std::uint64_t now_us = NowMicroseconds();
+    const std::uint64_t now_us = skate3::dedicated::NowMicroseconds();
 
     if (received > 0) {
       skate3::dedicated::metrics::RecordReceive(static_cast<std::size_t>(received));
@@ -1421,7 +723,7 @@ int main(int argc, char **argv) {
               joined.insert(connection_id);
               for (const auto &peer : router.Peers()) {
                 if (peer.connection_id == connection_id) {
-                  RaisePlayerEvent("playerJoining", peer.role);
+                  skate3::dedicated::RaisePlayerEvent("playerJoining", peer.role);
                   break;
                 }
               }
@@ -1435,7 +737,7 @@ int main(int argc, char **argv) {
           // client<->server conversation and the server decides who hears
           // what. Forwarding them would also bypass the interest management
           // applied below, which must never thin a game action.
-          HandleScriptEventPacket(script_peers, script_host, router,
+          skate3::dedicated::HandleScriptEventPacket(script_peers, script_host, router,
                                   connection_id, packet, envelope);
         } else {
           const auto route =
@@ -1497,13 +799,13 @@ int main(int argc, char **argv) {
         joined.erase(connection_id);
         const auto role = role_by_connection.find(connection_id);
         if (role != role_by_connection.end()) {
-          g_scopes.Forget(role->second);
-          if (g_appearance_store != nullptr) {
+          skate3::dedicated::g_scopes.Forget(role->second);
+          if (skate3::dedicated::g_appearance_store != nullptr) {
             // The blob itself is kept - a reconnecting player is the most
             // likely next uploader of exactly these bytes.
-            g_appearance_store->ForgetRole(role->second);
+            skate3::dedicated::g_appearance_store->ForgetRole(role->second);
           }
-          RaisePlayerEvent("playerDropped", role->second);
+          skate3::dedicated::RaisePlayerEvent("playerDropped", role->second);
         }
         std::printf("skate3-dedicated: connection %llu timed out\n",
                     static_cast<unsigned long long>(connection_id));
@@ -1517,28 +819,28 @@ int main(int argc, char **argv) {
     {
       // Applied here rather than in the native, because the router is only
       // safe to mutate from this thread.
-      std::lock_guard<std::mutex> lock(g_bucket_mutex);
-      for (const auto &[role, bucket] : g_pending_buckets) {
+      std::lock_guard<std::mutex> lock(skate3::dedicated::g_bucket_mutex);
+      for (const auto &[role, bucket] : skate3::dedicated::g_pending_buckets) {
         (void)router.SetBucket(role, bucket);
       }
-      g_pending_buckets.clear();
+      skate3::dedicated::g_pending_buckets.clear();
     }
     {
-      std::lock_guard<std::mutex> lock(g_name_mutex);
-      for (auto &[role, name] : g_pending_names) {
+      std::lock_guard<std::mutex> lock(skate3::dedicated::g_name_mutex);
+      for (auto &[role, name] : skate3::dedicated::g_pending_names) {
         (void)router.SetName(role, std::move(name));
       }
-      g_pending_names.clear();
+      skate3::dedicated::g_pending_names.clear();
     }
-    g_players.Publish(router.Peers());
-    g_scopes.Update(g_players.All(), options.radius);
+    skate3::dedicated::g_players.Publish(router.Peers());
+    skate3::dedicated::g_scopes.Update(skate3::dedicated::g_players.All(), options.radius);
     script_host.Tick();
-    DrainScriptEvents(relay_socket, script_peers, router, addresses, now_us);
+    skate3::dedicated::DrainScriptEvents(relay_socket, script_peers, router, addresses, now_us);
 
     // Measured before the idle sleep below, deliberately - see RelayMetrics'
     // own comment for why the sleep must not count as loop work.
     skate3::dedicated::metrics::RecordIteration(
-        now_us, NowMicroseconds() - iteration_start_us);
+        now_us, skate3::dedicated::NowMicroseconds() - iteration_start_us);
 
     if (received <= 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(2));

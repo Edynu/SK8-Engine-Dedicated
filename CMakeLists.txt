@@ -681,6 +681,10 @@ add_executable(skate3_dedicated
     tools/relay/skate3_dedicated_main.cpp
     tools/relay/skate3_dedicated_metrics.cpp
     tools/relay/skate3_dedicated_config.cpp
+    tools/relay/skate3_dedicated_players.cpp
+    tools/relay/skate3_dedicated_appearance.cpp
+    tools/relay/skate3_dedicated_lua.cpp
+    tools/relay/skate3_dedicated_script_events.cpp
     src/skate3_lua_admin_http.cpp
     src/skate3_lua_script_host.cpp
 )
