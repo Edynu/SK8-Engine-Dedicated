@@ -2036,6 +2036,48 @@ std::string ParseJsonStringLiteral(const std::string& text, std::size_t& i) {
 // Intercepted before generic event dispatch (same reasoning as
 // TryApplyStateBagEvent) so player names are known even with zero Lua
 // resources loaded - GetPlayerName() must work on its own.
+// The server asking this client to move.
+//
+// Intercepted natively rather than left to a Lua resource, because it has to
+// work with zero resources loaded - the same reasoning that puts player names
+// and the appearance roster on this path. Movement stays client-authoritative:
+// this is the client CHOOSING to honour the request, which is why the server
+// native is documented as a request rather than a teleport.
+bool HandleSetCoordsEvent(const std::string& event,
+                          const std::string& json_args) {
+  if (event != "skate3:setCoords") {
+    return false;
+  }
+  // ["x","y","z"] as plain numbers; parsed by hand to avoid dragging a JSON
+  // parser into a path that has to work before any script does.
+  double values[3] = {0.0, 0.0, 0.0};
+  std::size_t cursor = json_args.find('[');
+  if (cursor == std::string::npos) {
+    return true;
+  }
+  ++cursor;
+  for (double& value : values) {
+    while (cursor < json_args.size() &&
+           (json_args[cursor] == ' ' || json_args[cursor] == ',')) {
+      ++cursor;
+    }
+    if (cursor >= json_args.size()) {
+      return true;  // malformed; better to ignore than teleport to nowhere
+    }
+    value = std::strtod(json_args.c_str() + cursor, nullptr);
+    const std::size_t next = json_args.find(',', cursor);
+    if (next == std::string::npos) {
+      cursor = json_args.size();
+    } else {
+      cursor = next + 1;
+    }
+  }
+  mechanics_sandbox::RequestMessageTeleport(static_cast<float>(values[0]),
+                                            static_cast<float>(values[1]),
+                                            static_cast<float>(values[2]));
+  return true;
+}
+
 bool HandlePlayerNamedEvent(const std::string& event, const std::string& json_args) {
   if (event != "skate3:playerNamed") {
     return false;
@@ -2757,7 +2799,8 @@ void SyncResourcesFromServer(const std::string& host, std::uint16_t admin_port,
     multiplayer::SetScriptEventHandler(
         [](const std::string& event, const std::string& json_args) {
           if (HandlePlayerNamedEvent(event, json_args) ||
-              HandlePlayerRosterEvent(event, json_args)) {
+              HandlePlayerRosterEvent(event, json_args) ||
+              HandleSetCoordsEvent(event, json_args)) {
             return;
           }
           if (g_host && !g_host->TryApplyStateBagEvent(event, json_args)) {

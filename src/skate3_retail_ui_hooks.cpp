@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include <rex/filesystem.h>
@@ -32,6 +33,32 @@
 #include <rex/logging.h>
 #include <rex/kernel/xam/input_injection.h>
 #include <rex/system/function_dispatcher.h>
+
+// The first unlock attempt, kept behind a flag so the bug it appears to cause
+// can be reproduced on demand - see the CAC_GetItemUnlockHALID override.
+REXCVAR_DEFINE_BOOL(
+    skate3_cac_clear_unlock_hal_id, false, "Skate 3",
+    "Report an empty unlock HAL id for every Create-a-Skater item while "
+    "everything is unlocked. Superseded by the progression flag, which is what "
+    "actually removes the padlock; this reports the same id for every item, "
+    "which is suspected of breaking item selection and hiding colour/option "
+    "rows in the editor. Off unless you are reproducing that.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+// Which Create-a-Skater option types the unlock remaps to "owned".
+//
+// A dial rather than a constant because the correct answer is not settled: the
+// editor mis-selects items and hides option rows, and this is the strongest
+// suspect. 0 isolates it completely.
+REXCVAR_DEFINE_DOUBLE(
+    skate3_cac_option_remap, 1, "Skate 3",
+    "0 = remap no option types while everything is unlocked (padlocks come "
+    "back, but the item list is retail's own), 1 = remap only 'locked', "
+    "2 = also remap the fourth 'none' that a flag-unlocked item reports. "
+    "2 is suspected of turning empty rows into items, which shifts every "
+    "index after them.")
+    .range(0, 2)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(skate3_unlock_everything, false, "Skate 3",
                     "Treat every progression unlock as earned - clothing, boards, "
@@ -112,6 +139,12 @@ constexpr uint32_t kOptionTypeUnclaimed = 0x82202434u;
 // hooks read instead. Relaxed is right - these are diagnostics, and a flag
 // flipped in the console taking one extra frame to be observed changes
 // nothing.
+// See the CAC_GetItemUnlockHALID override for why this defaults off.
+std::atomic<bool> g_clear_unlock_hal_id{false};
+// 0 = remap nothing, 1 = locked only, 2 = locked + unclaimed. See the
+// CAC_GetOptionType override for why 2 is suspected of inserting phantom rows.
+std::atomic<int> g_option_remap_mode{1};
+
 std::atomic<bool> g_trace_cac_bindings{false};
 std::atomic<bool> g_trace_menu{false};
 std::atomic<bool> g_unlock_everything{false};
@@ -125,16 +158,39 @@ void RefreshCachedFlags() {
       std::memory_order_relaxed);
   g_trace_menu.store(rex::cvar::Query<bool>("skate3_trace_menu"),
                      std::memory_order_relaxed);
-  g_unlock_everything.store(rex::cvar::Query<bool>("skate3_unlock_everything"),
-                            std::memory_order_relaxed);
-  // The online engine rules as a single switch, so the whole layer can be
+  g_clear_unlock_hal_id.store(
+      rex::cvar::Query<bool>("skate3_cac_clear_unlock_hal_id"),
+      std::memory_order_relaxed);
+  g_option_remap_mode.store(
+      static_cast<int>(rex::cvar::Query<double>("skate3_cac_option_remap")),
+      std::memory_order_relaxed);
+  // EFFECTIVE, not the cvar. An online session forces the unlock
+  // (UnlockForcedByOnlineSession), and for a long time only
+  // EnforceUnlockEverything knew that: it set the progression byte while every
+  // UI hook still gated on the cvar alone. The result was a half-unlocked
+  // editor - items genuinely unlocked and selectable, but CAC_GetOptionType
+  // still reporting them as neither owned nor locked, which renders as an
+  // empty row. Measured from a trace: "progression unlock-all = true" in the
+  // log while 453 of 472 OptionType queries came back unremapped.
+  //
+  // One predicate for both, so the two layers cannot disagree again.
+  //
+  // Computed into a local first: the online state is published below, and
+  // reading it back through the accessor here would use the PREVIOUS frame's
+  // value - a one-frame skew that is exactly the kind of thing that makes a
+  // bug like this intermittent.
+  //
+  // The online engine rules are a single switch, so the whole layer can be
   // A/B tested against a frame-time readout without relaunching offline
   // (which would also remove the relay traffic and confound the result).
   // Everything online-gated in this file reads OnlineSessionFlag(), so
   // clearing skate3_online_rules makes all of it inert in one step.
-  g_online_session.store(
+  const bool online =
       rex::cvar::Query<bool>("skate3_multiplayer_relay_active") &&
-          rex::cvar::Query<bool>("skate3_online_rules"),
+      rex::cvar::Query<bool>("skate3_online_rules");
+  g_online_session.store(online, std::memory_order_relaxed);
+  g_unlock_everything.store(
+      rex::cvar::Query<bool>("skate3_unlock_everything") || online,
       std::memory_order_relaxed);
 }
 
@@ -144,6 +200,12 @@ bool TraceCacBindings() {
 bool TraceMenu() { return g_trace_menu.load(std::memory_order_relaxed); }
 bool UnlockEverythingFlag() {
   return g_unlock_everything.load(std::memory_order_relaxed);
+}
+int OptionRemapMode() {
+  return g_option_remap_mode.load(std::memory_order_relaxed);
+}
+bool ClearUnlockHalIdFlag() {
+  return g_clear_unlock_hal_id.load(std::memory_order_relaxed);
 }
 bool OnlineSessionFlag() {
   return g_online_session.load(std::memory_order_relaxed);
@@ -157,8 +219,22 @@ bool OnlineSessionFlag() {
 // A STRONG SYMBOL, like the others: dispatcher->SetFunction reaches only calls
 // routed through the dispatcher, and defining the symbol is what actually
 // replaces a directly-called function here.
+//
+// OFF BY DEFAULT, and probably vestigial. This was the FIRST attempt at
+// unlocking - it removed the requirement text but left the padlock, which is
+// what led to finding the progression flag that answers the one question both
+// the padlock and SelectItem actually ask. With that flag doing the real work,
+// this override buys nothing and is not obviously harmless: it reports THE SAME
+// empty id for every item, and a HAL id is a hashed asset identifier, not a
+// padlock flag. Anything in the editor that keys on it - grouping colour
+// variants, mapping a highlighted row back to an item - sees every item as
+// identical.
+//
+// That is the shape of a reported bug: with everything unlocked, picking an
+// item applies a different one, the picked item appears at index 1, and colour
+// and option rows go missing. Enable it only to reproduce that.
 extern "C" REX_FUNC(sub_825A74A0) {
-  if (!UnlockEverythingFlag()) {
+  if (!UnlockEverythingFlag() || !ClearUnlockHalIdFlag()) {
     __imp__sub_825A74A0(ctx, base);
     return;
   }
@@ -235,10 +311,22 @@ void TraceItem(const char* name, uint32_t index, uint32_t result,
 extern "C" REX_FUNC(sub_825FF4C8) {
   const uint32_t index = ctx.r4.u32;
   __imp__sub_825FF4C8(ctx, base);
-  if (UnlockEverythingFlag() &&
-      (ctx.r3.u32 == kOptionTypeLocked ||
-       ctx.r3.u32 == kOptionTypeUnclaimed)) {
-    ctx.r3.u32 = kOptionTypeOwned;
+  if (UnlockEverythingFlag()) {
+    const int mode = OptionRemapMode();
+    const bool remap_locked = mode >= 1 && ctx.r3.u32 == kOptionTypeLocked;
+    // Mode 2 is under suspicion, which is why it is no longer the default.
+    // The claim was that kOptionTypeUnclaimed means "an item that is neither
+    // owned nor locked", so remapping it is what makes a flag-unlocked item
+    // draw. A trace says otherwise: the constant this function is documented
+    // to return for "not an item" (0x82202418) NEVER appears in 472 calls,
+    // while kOptionTypeUnclaimed accounts for 453 of them. If that value is
+    // really "not an item" here, remapping it turns every empty row into an
+    // item - which matches the reported symptom of the wanted shirt sitting
+    // one box further along after each selection.
+    const bool remap_unclaimed = mode >= 2 && ctx.r3.u32 == kOptionTypeUnclaimed;
+    if (remap_locked || remap_unclaimed) {
+      ctx.r3.u32 = kOptionTypeOwned;
+    }
   }
   TraceItem("OptionType", index, ctx.r3.u32, base);
 }
@@ -284,12 +372,124 @@ extern "C" REX_FUNC(sub_82DDB710) {
 #define SKATE3_CAC_CALL_TRACE(symbol, label)                          extern "C" REX_FUNC(symbol) {                                         const uint32_t a3 = ctx.r3.u32, a4 = ctx.r4.u32;                    __imp__##symbol(ctx, base);                                         if (TraceCacBindings()) {            REXLOG_INFO("cac-pick: {} r3=0x{:08X} r4=0x{:08X} -> 0x{:08X}",                   label, a3, a4, ctx.r3.u32);                           }                                                                 }
 
 SKATE3_CAC_CALL_TRACE(sub_825A70B0, "CAC_OnThumbnailSelect")
-SKATE3_CAC_CALL_TRACE(sub_825FD9F0, "SelectItem")
 SKATE3_CAC_CALL_TRACE(sub_825A5078, "OnMenuGetItemEnabled")
 SKATE3_CAC_CALL_TRACE(sub_825A7600, "CAC_IsPartNew")
 SKATE3_CAC_CALL_TRACE(sub_825A74F0, "CAC_GetInfoPanelType")
 
 #undef SKATE3_CAC_CALL_TRACE
+
+// The per-menu record the grid bindings read and write, read directly.
+//
+// WHY NOT WRAP THE BINDINGS. Wrapping CAC_GetNumItems and
+// CAC_GetCurrentMenuIndex and logging ctx.r3 was useless: both tail-call
+// sub_82E86550, the Flash integer-return helper, so r3 on the way out is a
+// guest heap pointer to a wrapped script value (0x475E7CD0 and friends in the
+// capture), not the number. CAC_UpdateMenuIndices is worse - it is a WRITER
+// whose two arguments come from Flash via sub_82E62E00/sub_82E5F2A8, so they
+// are never in a register this side can see either.
+//
+// All three touch the same place, and it is plain memory:
+//
+//   machine = [0x8309FE1C]        sub_824AD240's global, no call needed
+//   manager = [[machine + 8] + 60]
+//   menu_id = [[manager + 5844] - 4]
+//   record  = 0x8302FA10 + 48 * menu_id
+//
+// with current_index at +24, min_window_index at +28 and the item vector's
+// begin/end at +32/+36 (CAC_GetNumItems' generic path returns
+// (end - begin) / 4). Reading that record answers what the wrapped returns
+// could not, and it also shows the item LIST rather than just its length -
+// which matters, because "the wanted shirt sits one box further along" is a
+// claim about list contents, not about window arithmetic.
+//
+// The scrolling-window theory that these traces were added for is dead, and
+// this record is why: Flash never once called
+// CAC_GetCurrentMenuMinWindowIndex in the capture. It only ever WRITES both
+// indices through CAC_UpdateMenuIndices, so min_window cannot be an input to
+// an index Flash computes.
+namespace {
+
+// sub_824AD240's global: `lis r30,-31987` is 0x830D0000, less the 484 it
+// loads at. Getting this wrong is silent - the whole chain just reports
+// unreadable, which is what a first attempt at 0x8309FE1C did.
+constexpr uint32_t kScriptMachineSlot = 0x830CFE1Cu;
+constexpr uint32_t kMenuRecordTable = 0x8302FA10u;
+constexpr uint32_t kMenuRecordStride = 48u;
+
+void DumpMenuRecord(const char* when) {
+  if (!TraceCacBindings()) {
+    return;
+  }
+  // Each link named, because a single wrong constant makes the whole walk
+  // fail identically and there is no way to tell which one from "unreadable".
+  uint32_t machine = 0, object = 0, manager = 0, menu_vector = 0, menu_id = 0;
+  const char* failed = nullptr;
+  if (!guest_probe::ReadU32(kScriptMachineSlot, machine) || machine == 0) {
+    failed = "machine";
+  } else if (!guest_probe::ReadU32(machine + 8, object) || object == 0) {
+    failed = "object";
+  } else if (!guest_probe::ReadU32(object + 60, manager) || manager == 0) {
+    failed = "manager";
+  } else if (!guest_probe::ReadU32(manager + 5844, menu_vector) ||
+             menu_vector == 0) {
+    failed = "menu_vector";
+  } else if (!guest_probe::ReadU32(menu_vector - 4, menu_id)) {
+    failed = "menu_id";
+  }
+  if (failed != nullptr) {
+    REXLOG_INFO(
+        "cac-menu: {} unreadable at {} (machine=0x{:08X} object=0x{:08X} "
+        "manager=0x{:08X} vector=0x{:08X})",
+        when, failed, machine, object, manager, menu_vector);
+    return;
+  }
+
+  const uint32_t record = kMenuRecordTable + kMenuRecordStride * menu_id;
+  uint32_t current = 0, min_window = 0, begin = 0, end = 0;
+  guest_probe::ReadU32(record + 24, current);
+  guest_probe::ReadU32(record + 28, min_window);
+  guest_probe::ReadU32(record + 32, begin);
+  guest_probe::ReadU32(record + 36, end);
+
+  const int32_t count =
+      (end >= begin) ? static_cast<int32_t>((end - begin) / 4) : -1;
+  REXLOG_INFO(
+      "cac-menu: {} menu={} current={} min_window={} count={} "
+      "begin=0x{:08X} end=0x{:08X}",
+      when, menu_id, current, min_window, count, begin, end);
+
+  // The list itself, capped - long enough to see the whole shirt grid, short
+  // enough that a menu with hundreds of entries does not bury the rest.
+  if (count <= 0) {
+    return;
+  }
+  const int32_t shown = count < 24 ? count : 24;
+  std::string line;
+  for (int32_t i = 0; i < shown; ++i) {
+    uint32_t item = 0;
+    guest_probe::ReadU32(begin + static_cast<uint32_t>(i) * 4, item);
+    char cell[32] = {};
+    std::snprintf(cell, sizeof(cell), " [%d]=0x%08X", i, item);
+    line += cell;
+  }
+  REXLOG_INFO("cac-menu: {} items{}{}", when, line,
+              shown < count ? " ..." : "");
+}
+
+}  // namespace
+
+// Dumped on the way IN, before SelectItem acts, so the record still describes
+// the grid the click landed on rather than the one selection leaves behind.
+extern "C" REX_FUNC(sub_825FD9F0) {
+  const uint32_t a3 = ctx.r3.u32, a4 = ctx.r4.u32;
+  DumpMenuRecord("pre-select");
+  __imp__sub_825FD9F0(ctx, base);
+  if (TraceCacBindings()) {
+    REXLOG_INFO("cac-pick: SelectItem r3=0x{:08X} r4=0x{:08X} -> 0x{:08X}", a3,
+                a4, ctx.r3.u32);
+  }
+  DumpMenuRecord("post-select");
+}
 
 // Why SelectItem refuses.
 //

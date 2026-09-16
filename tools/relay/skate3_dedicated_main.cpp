@@ -392,6 +392,9 @@ int main(int argc, char **argv) {
   script_host.RegisterNative("GetPlayerRoutingBucket",
                              &skate3::dedicated::Lua_GetPlayerRoutingBucket);
   script_host.RegisterNative("GetPlayerName", &skate3::dedicated::Lua_GetPlayerName);
+  script_host.RegisterNative("DropPlayer", &skate3::dedicated::Lua_DropPlayer);
+  script_host.RegisterNative("SetPlayerCoords",
+                             &skate3::dedicated::Lua_SetPlayerCoords);
   skate3::lua_host::AdminHttpServer admin_http(script_host, "web-console");
   admin_http.SetSettingsProvider([&options]() {
     // Only what a client needs in order to enforce a rule; the rest of
@@ -876,6 +879,28 @@ int main(int argc, char **argv) {
         (void)router.SetName(role, std::move(name));
       }
       skate3::dedicated::g_pending_names.clear();
+    }
+    {
+      // Script-requested disconnects. Applied here for the same reason as the
+      // two above: the router is only safe to mutate from this thread.
+      std::lock_guard<std::mutex> lock(skate3::dedicated::g_drop_mutex);
+      for (const auto &[role, reason] : skate3::dedicated::g_pending_drops) {
+        const std::uint64_t connection = router.ConnectionForRole(role);
+        if (connection == 0) {
+          continue;  // already gone, or never existed
+        }
+        router.Remove(connection);
+        addresses.erase(connection);
+        joined.erase(connection);
+        // The role is deliberately NOT returned to the allocator - ids only
+        // ever count upward, so a dropped player's id is never handed to
+        // somebody else (see RoleAllocator).
+        roles.Release(connection);
+        skate3::dedicated::RaisePlayerEvent("playerDropped", role);
+        std::printf("skate3-dedicated: dropped role %u%s%s\n", role,
+                    reason.empty() ? "" : " - ", reason.c_str());
+      }
+      skate3::dedicated::g_pending_drops.clear();
     }
     skate3::dedicated::g_players.Publish(router.Peers());
     skate3::dedicated::g_scopes.Update(skate3::dedicated::g_players.All(), options.radius);

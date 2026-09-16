@@ -8,9 +8,9 @@
     "Single-value wrappers exist alongside the table natives (GetSkaterScore, GetSkaterGrind, GetSkaterBail). Prefer a table when two fields must agree - each scalar call takes its own snapshot, so reading the multiplier and sequence score separately can straddle a landing and pair a score with the wrong multiplier."
   ],
   "counts": {
-    "total": 123,
+    "total": 125,
     "client": 101,
-    "server": 8,
+    "server": 10,
     "shared": 14
   },
   "natives": [
@@ -659,6 +659,14 @@
       "notes": "Queued and drained rather than polled, so a grind that starts and ends between two script frames is still reported - the same reason the trick events are queued."
     },
     {
+      "name": "DropPlayer",
+      "side": "server",
+      "signature": "DropPlayer(id [, reason]) -> boolean",
+      "summary": "Disconnects a player. Returns true when the request was ACCEPTED, not when it completed - the disconnect happens on the relay thread, because the router is not safe to mutate from a script thread. The dropped id is never recycled.",
+      "category": "Server",
+      "notes": "There is no kick packet: the client finds out the same way it finds out a server went away - the relay stops answering. A 'you were kicked' message would be a protocol change rather than a native, and is worth doing separately."
+    },
+    {
       "name": "GetConvar",
       "side": "server",
       "signature": "GetConvar(name [, default]) -> string",
@@ -692,6 +700,14 @@
       "signature": "GetSkaters() -> { id, ... }",
       "summary": "Every connected player's id, from the relay's own presence tracking.",
       "category": "Server"
+    },
+    {
+      "name": "SetPlayerCoords",
+      "side": "server",
+      "signature": "SetPlayerCoords(id, x, y, z) -> boolean",
+      "summary": "Asks a player to move. A REQUEST, not a teleport: movement is client-authoritative by design, so the server asks and the client performs the move through its own teleport path. Returns true when the request was sent.",
+      "category": "Server",
+      "notes": "A client that ignores the event simply does not move, so a game mode should confirm arrival with GetSkater rather than assume it. The client honours this natively, before any resource loads - the same path player names and the appearance roster use."
     },
     {
       "name": "SetPlayerRoutingBucket",

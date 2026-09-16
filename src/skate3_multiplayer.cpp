@@ -2608,6 +2608,7 @@ public:
                                                local_appearance->bytes);
     }
     ServiceServerHeldAppearances();
+    ServiceRelayKeepalive(now, map_hash);
     ReceivePackets(now, map_hash, v12_compatibility);
     CompletePendingMapSpawnDecodes();
     PrunePeers(now);
@@ -5385,6 +5386,36 @@ private:
   // visibility behaviour for free: a peer beyond the configured radius is
   // simply absent and its appearance is never downloaded, and one that skates
   // into range appears here and is fetched then.
+  // Keeps a relay connection alive while nothing is being skated.
+  //
+  // The presence beacon used to be sent ONLY from inside the pose-broadcast
+  // path, gated on a live skater position. That made the keepalive a passenger
+  // of gameplay: open the Create-a-Skater editor, where there is no skater in
+  // the world and no poses are produced, and the client goes silent. The relay
+  // drops anything quiet for ten seconds (kStaleTimeoutMicroseconds), so
+  // editing an outfit for longer than that disconnected you - which is exactly
+  // what "connection ... timed out" in the server log while sitting in the
+  // editor was.
+  //
+  // The LAST KNOWN position is repeated rather than sending zeroes. The beacon
+  // feeds the relay's interest management, so publishing (0,0,0) would tell it
+  // the player had teleported to the origin and change who they can see - a
+  // worse bug than the one being fixed. With no position ever established
+  // there is nothing useful to say, so nothing is sent and the connection is
+  // allowed to lapse.
+  void ServiceRelayKeepalive(Clock::time_point now, std::uint32_t map_hash) {
+    if (!using_relay_ || !local_position_valid_ || bound_role_ <= 0) {
+      return;
+    }
+    if (last_beacon_send_ != Clock::time_point{} &&
+        now - last_beacon_send_ < std::chrono::milliseconds(500)) {
+      return;
+    }
+    SendPresenceBeacon(map_hash, local_position_,
+                       static_cast<std::uint16_t>(bound_role_));
+    last_beacon_send_ = now;
+  }
+
   void ServiceServerHeldAppearances() {
     std::vector<std::pair<std::uint32_t, std::uint64_t>> interest;
     interest.reserve(remote_peers_.size());

@@ -220,6 +220,11 @@ extern std::mutex g_bucket_mutex;
 extern std::vector<std::pair<std::uint32_t, std::uint32_t>> g_pending_buckets;
 extern std::mutex g_name_mutex;
 extern std::vector<std::pair<std::uint32_t, std::string>> g_pending_names;
+// Roles a script has asked to disconnect. Applied by the relay loop for the
+// same reason buckets and names are: the router is not safe to mutate from a
+// script thread.
+extern std::mutex g_drop_mutex;
+extern std::vector<std::pair<std::uint32_t, std::string>> g_pending_drops;
 
 // server.cfg values scripts can read through GetConvar. Set once in main.
 extern const std::unordered_map<std::string, std::string> *g_convars;
@@ -231,6 +236,8 @@ int Lua_GetPlayerName(lua_State *L);
 int Lua_GetConvar(lua_State *L);
 int Lua_GetSkaters(lua_State *L);
 int Lua_GetSkater(lua_State *L);
+int Lua_DropPlayer(lua_State *L);
+int Lua_SetPlayerCoords(lua_State *L);
 
 // Wraps one JSON string field, e.g. JsonString("Edynu") -> "\"Edynu\"".
 [[nodiscard]] std::string JsonString(std::string_view text);

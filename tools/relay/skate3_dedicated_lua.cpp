@@ -13,6 +13,8 @@
 
 #include "skate3_dedicated_server.h"
 
+#include <cstdio>
+
 #include "skate3_lua_admin_http.h"
 #include "skate3_multiplayer_protocol_v12.h"
 #include "skate3_multiplayer_protocol_v12_reliable.h"
@@ -74,6 +76,8 @@ skate3::lua_host::AdminHttpServer *g_admin_http = nullptr;
 // thread, since the router is not thread-safe.
 std::mutex g_bucket_mutex;
 std::vector<std::pair<std::uint32_t, std::uint32_t>> g_pending_buckets;
+std::mutex g_drop_mutex;
+std::vector<std::pair<std::uint32_t, std::string>> g_pending_drops;
 
 // Same reasoning, for names: SetName touches the router, which is only
 // safe to mutate from the relay thread, but the HTTP handler that learns a
@@ -229,5 +233,55 @@ int Lua_GetSkater(lua_State *L) {
   return 1;
 }
 
+
+// DropPlayer(id [, reason]) -> true if the id looked droppable.
+//
+// The disconnect itself happens on the relay thread; this only queues it, so
+// "true" means accepted rather than done. A dropped player's connection is
+// removed and its ROLE IS NOT RECYCLED - see RoleAllocator for why ids only
+// count upward.
+//
+// There is no kick packet: the client discovers it has been dropped when the
+// relay stops answering, the same way it discovers a server that went away.
+// Adding a "you were kicked" message is worth doing, but it is a protocol
+// change rather than a native.
+int Lua_DropPlayer(lua_State *L) {
+  const auto id = static_cast<std::uint32_t>(luaL_checkinteger(L, 1));
+  const char *reason = luaL_optstring(L, 2, "");
+  if (id == 0) {
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_drop_mutex);
+    g_pending_drops.emplace_back(id, reason != nullptr ? reason : "");
+  }
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+// SetPlayerCoords(id, x, y, z) -> true if the request was sent.
+//
+// A REQUEST, not a teleport. Player movement is client-authoritative here by
+// design, so the server asks and the client performs the move through its own
+// teleport path; a client that ignores the event simply does not move. That is
+// the honest shape of it, and a game mode should confirm with GetSkater rather
+// than assume the player arrived.
+int Lua_SetPlayerCoords(lua_State *L) {
+  const auto id = static_cast<std::uint32_t>(luaL_checkinteger(L, 1));
+  const double x = luaL_checknumber(L, 2);
+  const double y = luaL_checknumber(L, 3);
+  const double z = luaL_checknumber(L, 4);
+  if (id == 0) {
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+  char args[128];
+  std::snprintf(args, sizeof(args), "[%.4f,%.4f,%.4f]", x, y, z);
+  QueueClientScriptEvent(static_cast<std::uint16_t>(id), "skate3:setCoords",
+                         args);
+  lua_pushboolean(L, 1);
+  return 1;
+}
 
 }  // namespace skate3::dedicated

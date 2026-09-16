@@ -308,6 +308,14 @@ class VisualRelayRouter {
     return true;
   }
 
+  // The connection currently holding `role`, or 0. Exposed so a caller that
+  // only knows a player id (script natives do) can reach Remove, rather than
+  // scanning Peers() and hoping the two stay in step.
+  [[nodiscard]] std::uint64_t ConnectionForRole(std::uint32_t role) const {
+    const auto found = role_to_connection_.find(role);
+    return found == role_to_connection_.end() ? 0u : found->second;
+  }
+
   void Remove(std::uint64_t connection_id) {
     const auto peer = peers_.find(connection_id);
     if (peer == peers_.end()) {
