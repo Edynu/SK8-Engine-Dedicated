@@ -1,0 +1,212 @@
+{
+  "$schema_notes": "sk3o in-game console command reference. Grouped by subsystem/source file. 'kind' distinguishes real commands from UI-only affordances and standalone notes.",
+  "commands": [
+    {
+      "name": "help",
+      "category": "Built-in",
+      "kind": "command",
+      "source_file": null,
+      "usage": ["help"],
+      "description": "Lists these built-ins plus every registered command below."
+    },
+    {
+      "name": "echo",
+      "category": "Built-in",
+      "kind": "command",
+      "source_file": null,
+      "usage": ["echo <text>"],
+      "description": "Prints <text> back."
+    },
+    {
+      "name": "input_log",
+      "category": "Built-in",
+      "kind": "command",
+      "source_file": null,
+      "usage": ["input_log <on|off>"],
+      "description": "Toggle logging of raw input events into the console. Off by default; can get noisy."
+    },
+    {
+      "name": "skater",
+      "category": "Entity / World State",
+      "kind": "command",
+      "source_file": "sk3o_skater.cpp",
+      "usage": ["skater"],
+      "description": "Print the local skater's live entity address + world position."
+    },
+    {
+      "name": "entities",
+      "category": "Entity / World State",
+      "kind": "command",
+      "source_file": "sk3o_skater.cpp",
+      "usage": ["entities [class] [max]"],
+      "description": "Class counts (live/total) plus live entity rows with position where readable. class filters to one of base/lw/skater/colorized/cac/skater-aux (omit for all); max limits rows shown (default 40)."
+    },
+    {
+      "name": "entity_info",
+      "category": "Entity / World State",
+      "kind": "command",
+      "source_file": "sk3o_skater.cpp",
+      "usage": ["entity_info <hex addr>"],
+      "description": "Full spawn-time register snapshot for one entity (lr, r3, r5-r10)."
+    },
+    {
+      "name": "entity_set_pos",
+      "category": "Entity / World State",
+      "kind": "command",
+      "source_file": "sk3o_skater.cpp",
+      "usage": ["entity_set_pos <hex addr> <x> <y> <z>"],
+      "description": "One-shot WRITE of a live entity's world position (entity+416 translation). First game-state mutation this project ever did; confirmed to have no visible effect (see entity_freeze_pos)."
+    },
+    {
+      "name": "entity_freeze_pos",
+      "category": "Entity / World State",
+      "kind": "command",
+      "source_file": "sk3o_skater.cpp",
+      "usage": ["entity_freeze_pos <hex addr> <x> <y> <z>"],
+      "description": "Like entity_set_pos but re-applies every host frame while the console/entities window is open. Also confirmed no visible effect - see docs/sk3o/research.json (entity+416/+352 are downstream animation outputs, not renderer inputs)."
+    },
+    {
+      "name": "entity_unfreeze_pos",
+      "category": "Entity / World State",
+      "kind": "command",
+      "source_file": "sk3o_skater.cpp",
+      "usage": ["entity_unfreeze_pos <hex addr>"],
+      "description": "Stop a freeze started by entity_freeze_pos."
+    },
+    {
+      "name": "entity_dump",
+      "category": "Entity / World State",
+      "kind": "command",
+      "source_file": "sk3o_skater.cpp",
+      "usage": ["entity_dump <hex addr> [word_count=16]"],
+      "description": "Raw 4-byte words from a guest address, annotated with heap/stack/code pointer-range guesses."
+    },
+    {
+      "name": "entity_diff",
+      "category": "Entity / World State",
+      "kind": "command",
+      "source_file": "sk3o_skater.cpp",
+      "usage": ["entity_diff <hex addr> [word_count=512]"],
+      "description": "Snapshot an entity's raw words; call again on the same address to diff against the stored snapshot and print only what changed. The tool that found the 7-slot table and the position-palette fields."
+    },
+    {
+      "name": "scan",
+      "category": "Research Tooling",
+      "kind": "command",
+      "source_file": "sk3o_scan.cpp",
+      "usage": [
+        "scan reset <start hex> <end hex>",
+        "scan changed|unchanged|increased|decreased [epsilon]",
+        "scan value <n> [epsilon]",
+        "scan plausible [min] [max]",
+        "scan list [n]",
+        "scan status"
+      ],
+      "description": "Memory-scanner family, Cheat-Engine-style value scanning over a guest address range."
+    },
+    {
+      "name": "probe",
+      "category": "Research Tooling",
+      "kind": "command",
+      "source_file": null,
+      "usage": ["probe <hex addr> [label]"],
+      "description": "Install a runtime probe on an address. Only works for confirmed-indirect/bctrl targets, not direct bl calls - see meta.call_dispatch in research.json."
+    },
+    {
+      "name": "test_candidates",
+      "category": "Research Tooling",
+      "kind": "command",
+      "source_file": null,
+      "usage": ["test_candidates"],
+      "description": "Informational only; lists functions being considered for direct invocation and what's still missing before that's safe. Calls nothing."
+    },
+    {
+      "name": "spawn_caller",
+      "category": "Spawn-Chain Tracing",
+      "kind": "command",
+      "source_file": "sk3o_spawn_trace.cpp",
+      "usage": ["spawn_caller [name]"],
+      "description": "Last-call snapshot (caller address + r3-r10) for a traced function. Omit name to list every tracked function."
+    },
+    {
+      "name": "spawn_trace",
+      "category": "Spawn-Chain Tracing",
+      "kind": "command",
+      "source_file": "sk3o_spawn_trace.cpp",
+      "usage": ["spawn_trace <on|off|clear>"],
+      "description": "Ordered, timestamped log of every call to any traced function while on (also toggleable via the \"Trace spawn calls\" checkbox in the console window). Turning on clears the log first."
+    },
+    {
+      "name": "spawn_trace_mute",
+      "category": "Spawn-Chain Tracing",
+      "kind": "command",
+      "source_file": "sk3o_spawn_trace.cpp",
+      "usage": ["spawn_trace_mute <name>"],
+      "description": "Stop <name> from being written to the ordered log (its spawn_caller snapshot still updates). sub_8243AEE8 and sub_827690A8 are muted by default (confirmed noise generators)."
+    },
+    {
+      "name": "spawn_trace_unmute",
+      "category": "Spawn-Chain Tracing",
+      "kind": "command",
+      "source_file": "sk3o_spawn_trace.cpp",
+      "usage": ["spawn_trace_unmute <name>"],
+      "description": "Reverse spawn_trace_mute."
+    },
+    {
+      "name": "spawn_trace_mutelist",
+      "category": "Spawn-Chain Tracing",
+      "kind": "command",
+      "source_file": "sk3o_spawn_trace.cpp",
+      "usage": ["spawn_trace_mutelist"],
+      "description": "Show currently muted names."
+    },
+    {
+      "name": "Traced functions",
+      "category": "Spawn-Chain Tracing",
+      "kind": "note",
+      "source_file": "sk3o_spawn_trace.cpp",
+      "usage": [],
+      "description": "Currently traced functions (usable with spawn_caller/mute commands): sub_82808E30, sub_82768360, sub_827681D0, sub_82769478, sub_827690A8, sub_827649A0, sub_82765EC0, sub_82765DE8, sub_8275D900, sub_8243AEE8."
+    },
+    {
+      "name": "natives",
+      "category": "Natives Catalog",
+      "kind": "command",
+      "source_file": "sk3o_natives.cpp",
+      "usage": ["natives"],
+      "description": "List the confirmed native catalog (currently empty - nothing's been promoted from research into a confirmed, safe-to-call native yet)."
+    },
+    {
+      "name": "spawn_guest",
+      "category": "Natives Catalog",
+      "kind": "command",
+      "source_file": "sk3o_natives.cpp",
+      "usage": ["spawn_guest"],
+      "description": "Placeholder pending a confirmed skater-spawn native; currently just reports whether SKATER_LOCAL_GET resolved."
+    },
+    {
+      "name": "F8",
+      "category": "UI-only",
+      "kind": "ui",
+      "source_file": null,
+      "usage": ["F8"],
+      "description": "Toggle the console."
+    },
+    {
+      "name": "Entities button",
+      "category": "UI-only",
+      "kind": "ui",
+      "source_file": null,
+      "usage": ["Entities button (inside console)"],
+      "description": "Opens the entity window."
+    },
+    {
+      "name": "Trace spawn calls checkbox",
+      "category": "UI-only",
+      "kind": "ui",
+      "source_file": null,
+      "usage": ["Trace spawn calls checkbox (inside console)"],
+      "description": "Same as spawn_trace on/off."
+    }
+  ]
+}

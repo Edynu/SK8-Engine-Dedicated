@@ -1,0 +1,724 @@
+{
+  "generated_at": "2026-08-06T00:04:11.472Z",
+  "source_research_json": "docs/sk3o/research.json",
+  "source_ghidra_export": "docs/sk3o/export_ghidra/default.xex.c",
+  "note": "Auto-generated cross-reference. decompiled.params_raw are Ghidra's generic param_N/undefined-typed signatures, not yet semantically named - use calling_convention (hand-derived register notes) as the authoritative meaning where both exist. Promote/clean up before treating as a final native catalog; this is a working export for populating a website DB, not sk3o_natives.cpp.",
+  "functions": [
+    {
+      "name": "Function_826B82E0_and_Function_82883B10",
+      "status": "confirmed",
+      "category": "meta",
+      "address_1_0": "0x826b82e0",
+      "address_tu_name": null,
+      "summary": "DEAD END for the population-cap question, confirmed 2026-08-05. Function_826B82E0(param_1, param_2): a GENERIC base constructor, confirmed via direct disassembly to set `*param_1 = 0x82307254` (a real, confirmed vtable base - r9 loaded with the ADDRESS via lis+addi, not its contents). Referenced from 4 different table slots in the 0x8230721c region (823071e0, 82307214, 82307254, 82307288) - i.e. reused by multiple unrelated classes, not skater-specific. Conditionally (param_2&1) calls Function_82883B10() then a virtual method (+0xc) on its result. Function_82883B10 itself: a lazy-initialized singleton lookup (*(fixed_global+13836), inits via sub_82883C70 if null) that indexes an array of 108-BYTE STRUCTS by a running counter (*(other_global+3360)) and returns &array[count]+12 - i.e. 'allocate the next slot in a growing fixed-stride array'. Struct size (108) and field offsets (13836, 3360, 49588) match NOTHING seen in the actual skater creation chain (type ID 290/0x122, allocation sizes 0x68/0xa20/0xa40) - this reads as generic per-construction DEBUG/TELEMETRY logging (an allocation tracker/construction event log), not a gameplay object registry.",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_826B82E0",
+        "return_type": "undefined4 *",
+        "params_raw": "undefined4 *param_1,ulonglong param_2",
+        "param_count": 2,
+        "export_line": 183346
+      },
+      "additional_addresses": [
+        {
+          "address": "0x82883b10",
+          "decompiled": {
+            "raw_name": "Function_82883B10",
+            "return_type": "longlong",
+            "params_raw": "void",
+            "param_count": 0,
+            "export_line": 260134
+          }
+        }
+      ],
+      "evidence": [
+        "Ghidra decompiler + disassembly, 2026-08-05, generated/skate3_recomp.44.cpp:46536-46591 for sub_82883B10."
+      ],
+      "next_step": "Do not continue climbing this specific branch (Function_826B82E0 -> Function_82883B10) for the population-cap question - confirmed unrelated generic infrastructure. The sub_826B8340/sub_826B6498 (type-registry bootstrap) thread this branch came from may still be worth revisiting via a DIFFERENT neighboring slot if picked back up later."
+    },
+    {
+      "name": "Function_8275BF20",
+      "status": "confirmed",
+      "category": "skater",
+      "address_1_0": "0x8275bf20",
+      "address_tu_name": null,
+      "summary": "Found by direct XREF on 0x8230b470, the labeled data slot 2 positions (8 bytes) before the skater's own vtable base (0x8230B478). Confirmed a MULTIPLE-INHERITANCE CONSTRUCTOR: sets *param_1 (the vtable ptr) to &PTR_Function_82783738_8230b664 first (a different, previously-seen vtable slot), then immediately overwrites it with &PTR_Function_8275C038_8230b470 as the final vtable - the standard C++ pattern of a base sub-object's vtable being set during its own construction, then re-pointed to the actual final vtable. Being only 2 slots before the skater's own vtable base strongly suggests this constructs the immediate BASE class of SkaterPresEntity (plain PresentationEntity), not skater itself - close but likely one level up. SECOND finding: calls Function_82B411F0(0x216767bbb9ef6cb5, 0x8716cac581434d8d) - two 64-bit constants fed into a function whose result gets stored back into the object (param_1+0x48 via FUN_82b447b8) - the shape of a HASH/KEY COMPUTATION, not a normal call. Strong candidate for where a per-class 'resource_key' (the still-unknown parameter sub_82808E30's Function_82CD46C0 registry lookup needs) gets computed/cached at construction time.",
+      "calling_convention": null,
+      "call_kind": "direct-only, single caller (Ghidra-confirmed XREF)",
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_8275BF20",
+        "return_type": "void",
+        "params_raw": "undefined4 *param_1",
+        "param_count": 1,
+        "export_line": 217752
+      },
+      "evidence": [
+        "Ghidra disassembly + decompiler, 2026-08-05. XREF[1]: 826b6bd0(c) - exactly one caller."
+      ],
+      "next_step": "closed - caller found and read, see UndefinedFunction_826b6b10. Still worth reading Function_82B411F0 itself separately to confirm/deny the hash-key hypothesis."
+    },
+    {
+      "name": "UndefinedFunction_826b6b10",
+      "status": "confirmed",
+      "category": "spawn",
+      "address_1_0": "0x826b6b10",
+      "address_tu_name": null,
+      "summary": "Single caller of Function_8275BF20 (at call site 0x826b6bd0). NOT per-instance skater creation - this is a ONE-TIME SUBSYSTEM/TYPE-REGISTRY BOOTSTRAP. Repeatedly calls a generic allocator (Function_82883930) with different FIXED sizes (0x20, 0x68, 1, 0x38, 0xc), storing each result into sequential globals in the same small address range (DAT_8307xxxx - almost certainly fields of one manager/registry singleton struct). Function_8275BF20 is called specifically on the 0x68-byte allocation (DAT_83072368), guarded by a null check. Also does a vector-walk near the end (DAT_830734ac begin/end, calling FUN_829edd50 per entry) - a second, generic 'process all registered types' finalize step. Working hypothesis: this bootstraps class DESCRIPTOR/PROTOTYPE singletons (one per entity type, skater being one) into the resource registry that sub_82808E30's Function_82CD46C0 later looks up by resource_key - i.e. this is 'how the type system gets set up', not 'how a live skater gets spawned'. Valuable for understanding the architecture, but does not lead to a runtime spawn trigger by itself.",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": null,
+      "evidence": [
+        "Ghidra decompiler, 2026-08-05, traced from Function_8275BF20's single caller."
+      ],
+      "next_step": "Two threads if continuing here: (1) find THIS function's own caller (would confirm/deny the one-time-boot-init hypothesis - if called from an obvious init/startup path, hypothesis confirmed). (2) read FUN_829edd50 (the per-registered-type finalize callback) and Function_82883930 (the generic allocator - understanding its `0x101, 4`-style trailing params might reveal a type-tag/pool convention reused elsewhere). Given this leads to boot-time registry setup rather than live spawning, may be lower priority than other still-open threads depending on user goals."
+    },
+    {
+      "name": "sub_827B8300_and_sub_82843B60",
+      "status": "lead",
+      "category": "spawn",
+      "address_1_0": "0x827b8300",
+      "address_tu_name": null,
+      "summary": "sub_827B8300: walks a dynamic pointer-range list (begin/end at self+0x1c/+0x20) looking for an entry matching `type==2 && counter==0`, and asserts/crashes (Function_828837B0, size 0xa20) if the loop completes without finding one - reads like 'get a free type-2 slot, guaranteed to exist by caller precondition' rather than the population manager itself. sub_82843B60: an object constructor (allocates via Function_82782130 with type code 0x42, sets several fields from params, sets vtable pointer to &PTR_Function_82844148_8230fa30 - see meta.vtable_symbol_visibility_in_ghidra). Grouped together because they were reached via the same AddEntityToRenderViews-caller list but both currently look tangential to spawning rather than central - kept as a lead in case the 0xa20/type==2 correlation with sub_82808E38's own type-2 branch (same allocation size) turns out meaningful.",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_827B8300",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 229446
+      },
+      "additional_addresses": [
+        {
+          "address": "0x82843b60",
+          "decompiled": null
+        }
+      ],
+      "evidence": [
+        "Ghidra decompiler, retail 1.0 XEX, 2026-08-04 (via docs/sk3o/ghidra_scripts/sk3o_dump.py)."
+      ],
+      "next_step": "Not actively planned unless a stronger connection to the population cap shows up. sub_82843B60's vtable pointer discovery (PTR_Function_82844148_8230fa30) may be worth checking in Ghidra's Symbol Table for its own callers, per the new vtable-symbol-visibility finding."
+    },
+    {
+      "name": "sub_82808E38",
+      "status": "lead",
+      "category": "spawn",
+      "address_1_0": "0x82808e38",
+      "address_tu_name": null,
+      "summary": "STRONGEST CANDIDATE YET for the actual spawn/population-slot function. Signature: (self, slot_index, param_3, resource_key, param_5) -> bool. Looks up `resource_key` in a global registry via Function_82CD46C0; if resolved and the descriptor passes validity checks (non-null list at +0x94, count>0 at +0x98), constructs an object via one of two paths depending on the descriptor's type field (self+0x48==1|2 -> Function_827619A0; else -> Function_8275D900 with type constant 0x822 - the SAME function sub_827681D0's skater path uses with type 290/0x122, confirming this is a more general 'create by type' factory shared across entity kinds). After construction: atomic refcount increment, Function_8243AEE8(slot_ptr) (same queue/register call sub_827681D0 uses), marks the slot occupied (`*(byte*)(self+slot_index+0x120) = 1`), then Function_828082E8(self, created_object) -> AddEntityToRenderViews. Returns 1 on success, 0 if resource_key didn't resolve. `slot_index` is used as an array index into `self` (both at +0x120 for the occupied-flag and via `(slot_index+0x28)*4` elsewhere) - if `self` has a small FIXED slot count, the bounds check on slot_index (not yet located) IS the observed 3-4 concurrent-skater cap.",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": null,
+      "evidence": [
+        "Ghidra decompiler, retail 1.0 XEX, 2026-08-04. Reached via the AddEntityToRenderViews caller chain: sub_82808E38 -> Function_828082E8 (0x82808ff0 call site) -> AddEntityToRenderViews."
+      ],
+      "next_step": "Two open threads, both high-value: (1) find sub_82808E38's own caller(s) - very likely the actual population-manager loop that decides WHEN and with WHAT resource_key to call this, i.e. the real 'spawn a skater' trigger. (2) find where slot_index gets bounds-checked against the slot-array's size - either inside this function above the part already read, or in its caller - that bounds constant is the cap itself and the most direct answer to 'can we resize the 4-skater limit'."
+    },
+    {
+      "name": "sub_828082E8",
+      "status": "lead",
+      "category": "render",
+      "address_1_0": "0x828082e8",
+      "address_tu_name": null,
+      "summary": "Calls AddEntityToRenderViews with r5 (view-type selector) depending on a state field at self+0x1c: state==0 -> one call with r5=0; state==1 -> TWO calls, r5=3 then r5=2; any other state -> returns without calling anything. This is the function that revealed AddEntityToRenderViews actually takes a third meaningful parameter (r5) - previously undocumented, since every live SpawnSnapshot capture we've taken shows r5=0 (the skater path only ever exercises the single-call/state==0 route). The paired r5=3-then-2 calls plausibly correspond to registering into two separate render view lists (main-pass + shadow-pass, per the existing BindConstants notes about c191-194 main / c188-191 shadow staging), i.e. a 'has a shadow' or 'dual-view' variant of registration.",
+      "calling_convention": null,
+      "call_kind": "direct-only, single caller (Ghidra-confirmed XREF)",
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_828082E8",
+        "return_type": "void",
+        "params_raw": "int param_1,undefined8 param_2",
+        "param_count": 2,
+        "export_line": 239414
+      },
+      "evidence": [
+        "Ghidra disassembly + decompiler, retail 1.0 XEX, 2026-08-04. XREF[1]: 82808ff0(c) - exactly one caller."
+      ],
+      "next_step": "Trace 0x82808ff0 (the single caller) - a clean, non-vtable lead, much more tractable than the sub_827843F0 dead end."
+    },
+    {
+      "name": "PresentationEntity_BindConstants",
+      "status": "confirmed",
+      "category": "entity",
+      "address_1_0": "0x827831a0",
+      "address_tu_name": "sub_827A6658",
+      "summary": "Base BindConstants override; every renderable PresentationEntity subclass calls this. Write point for the whole identity store.",
+      "calling_convention": "r3 = entity (post-call, hooked as EXIT)",
+      "call_kind": "unknown - not yet grepped for direct call sites",
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_827831A0",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 221589
+      },
+      "evidence": [
+        "Hooked in skate3_native_render.cpp; production-proven (entity store populates)."
+      ]
+    },
+    {
+      "name": "SkaterPresEntity_BindConstants",
+      "status": "confirmed",
+      "category": "skater",
+      "address_1_0": "0x82760950",
+      "address_tu_name": "sub_82783D68",
+      "summary": "Tags an entity EntClass::kSkater in the identity store.",
+      "calling_convention": "r3 = entity",
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_82760950",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 218155
+      }
+    },
+    {
+      "name": "ColorizedSkaterPresEntity_BindConstants",
+      "status": "confirmed",
+      "category": "skater",
+      "address_1_0": "0x82761e30",
+      "address_tu_name": "sub_82785260",
+      "summary": "Tags an entity EntClass::kColorized.",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_82761E30",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 218305
+      }
+    },
+    {
+      "name": "CACPresEntity_BindConstants",
+      "status": "confirmed",
+      "category": "skater",
+      "address_1_0": "0x82770a98",
+      "address_tu_name": "sub_82793F70",
+      "summary": "Tags an entity EntClass::kCac; re-pushes world matrix UNtransposed from +352 instead of +416.",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_82770A98",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 219483
+      }
+    },
+    {
+      "name": "cLivingWorldPresEntity_BindConstants",
+      "status": "confirmed",
+      "category": "livingworld",
+      "address_1_0": "0x8279e070",
+      "address_tu_name": "sub_827C1720",
+      "summary": "Tags an entity EntClass::kLivingWorld (pedestrians/traffic/props).",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_8279E070",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 224813
+      }
+    },
+    {
+      "name": "AddEntityToRenderViews",
+      "status": "confirmed",
+      "category": "render",
+      "address_1_0": "0x82783860",
+      "address_tu_name": "sub_827A6C50",
+      "summary": "Sk8::RenderPresentation::AddEntityToRenderViews - registers an entity into a render view; per-entity scene-membership/lifetime signal. Only ever reached via direct compiled calls in every call site checked so far, so `probe` cannot intercept it - use the compile-time hook's captured lr/register SpawnSnapshot instead (native_entity.h GetSpawnSnapshot).",
+      "calling_convention": "r4 = entity, r5 = view-type selector (0, 2, or 3 observed - see sub_828082E8 below; every live SpawnSnapshot capture so far shows r5=0, meaning we've only ever observed skater-path spawns take the single-call/r5=0 route, never the double-call route).",
+      "call_kind": "direct-only (confirmed: zero bctrl/indirect call sites found; every caller found is a literal `sub_82783860(ctx, base)`)",
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_82783860",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 221724
+      }
+    },
+    {
+      "name": "RmvEntityFrmRenderViews",
+      "status": "confirmed",
+      "category": "render",
+      "address_1_0": "0x827838f8",
+      "address_tu_name": "sub_827A6CE8",
+      "summary": "Sk8::RenderPresentation::RmvEntityFrmRenderViews - the despawn/removal counterpart to AddEntityToRenderViews.",
+      "calling_convention": "r4 = entity",
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_827838F8",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 221733
+      }
+    },
+    {
+      "name": "sub_8278C1E8",
+      "status": "confirmed",
+      "category": "render",
+      "address_1_0": "0x8278c1e8",
+      "address_tu_name": null,
+      "summary": "RESOLVED (all 3 previously-stripped 'unreachable' blocks read 2026-08-04): this is a per-entity VISIBILITY SYNC function, not a spawn/population manager. Calls a virtual 'should this be visible' check (vtable slot self+0x44); if it returns false, ADDS the entity to render views (sets a flag byte at entity+0x7d, calls AddEntityToRenderViews with r5=0); separately/unconditionally sets a flag byte at entity+500=1 and ADDs again (block_8278c430); the already-known visible tail REMOVES (entity+500=0, RmvEntityFrmRenderViews) when the entity should stop being visible. Net effect: keeps an EXISTING entity's render-view membership in sync with a per-tick visibility/LOD check. Does not create or destroy the underlying entity object, does not touch a slot array or count - reclassified from category 'spawn' to 'render'. Downgraded priority for the population-cap question specifically, though it's solid confirmed knowledge of the general add/remove lifecycle.",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_8278C1E8",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 223151
+      },
+      "evidence": [
+        "Ghidra decompiler, retail 1.0 XEX, 2026-08-04 (via docs/sk3o/ghidra_scripts/sk3o_dump.py), including block_8278c410/8278c430/8278c448 (the 3 stripped blocks) read in a follow-up pass."
+      ],
+      "next_step": "closed for the spawn-manager question. Not planned for further tracing unless a new reason connects it to population/spawning specifically."
+    },
+    {
+      "name": "AddRenderInstance",
+      "status": "confirmed",
+      "category": "world",
+      "address_1_0": "0x8276de00",
+      "address_tu_name": "sub_82791290",
+      "summary": "Sk8::WorldPresentation::AddRenderInstance(pegasus::tInstance*) - the world registry add; fires per placed instance during map load, and calls into AddEntityToRenderViews. The prewarm's primary mesh source.",
+      "calling_convention": "r4 = tInstance*",
+      "call_kind": "direct-only (both known callers use literal calls)",
+      "decompiled": null,
+      "evidence": [
+        "Already named/documented in skate3_native_render.cpp and skate3_native_scene.cpp before this research pass."
+      ]
+    },
+    {
+      "name": "sub_82771CC8",
+      "status": "lead",
+      "category": "world",
+      "address_1_0": "0x82771cc8",
+      "address_tu_name": null,
+      "summary": "Direct caller of AddRenderInstance; loads a FIXED constant address into r3 before calling - registers one specific, always-present instance, not a general spawn path.",
+      "calling_convention": null,
+      "call_kind": "unknown (never found as a direct call site itself; only present in the dense function table, which proves nothing either way per meta.call_dispatch)",
+      "decompiled": null
+    },
+    {
+      "name": "sub_82771D28",
+      "status": "superseded",
+      "category": "world",
+      "address_1_0": "0x82771d28",
+      "address_tu_name": null,
+      "summary": "Direct caller of AddRenderInstance; walks a hash-bucket/linked-list structure (fields at self+488/+492) and calls AddRenderInstance once per entry - looks like a 'flush all pending instances' bulk operation (streaming/map-load), not a live single-item spawn.",
+      "calling_convention": null,
+      "call_kind": "unknown, same caveat as sub_82771CC8",
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_82771D28",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 219653
+      }
+    },
+    {
+      "name": "sub_827681D0",
+      "status": "superseded",
+      "category": "skater",
+      "address_1_0": "0x827681d0",
+      "address_tu_name": null,
+      "summary": "[SUPERSEDED 2026-08-05 - see superseded_by entries for the full real body read, resource-descriptor gating logic, and confirmed row-struct layout. This entry's own findings below are NOT wrong, just superseded by a much fuller picture - the r3_origin_trace_result adjustor-thunk dead-end is still the best available lead on this function's OTHER call path.] PROVEN caller of AddEntityToRenderViews for the LOCAL PLAYER's skater (observed added_by lr=0x82768310, which is inside this function). Does conditional resource lookup/creation, an asset-format call (sub_828837B0, buffer size 2592), a resource-registration call (sub_8275D900, fixed type constant 290), a queue/registration call (sub_8243AEE8), then AddEntityToRenderViews. Reads like 'create/get presentation for this game object and register it'.",
+      "calling_convention": null,
+      "call_kind": "direct-only (single known caller: sub_82768360)",
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_827681D0",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 218730
+      },
+      "evidence": [
+        "Live session: skater entity's added_by = 0x82768310, which is the return address of the `bl 0x82783860` at generated/skate3_recomp.34.cpp:10069-10071, inside this function."
+      ]
+    },
+    {
+      "name": "sub_82768360",
+      "status": "superseded",
+      "category": "skater",
+      "address_1_0": "0x82768360",
+      "address_tu_name": null,
+      "summary": "Only caller of sub_827681D0. Large function: two flag/cvar-style gate checks (sub_827FBC28, sub_827FBAA0, early-out if either fails), then distance/threshold float math against a parameter struct (r30+0, r30+48) before proceeding. Reads like a LAZY PRESENTATION-CREATION GATE (create the renderable once an existing game-logic object is close enough / conditions met), NOT a 'spawn a brand new skater' entry point.",
+      "calling_convention": null,
+      "call_kind": "direct-only (single known caller: sub_82784410 family, via sub_827843F0's stage-1 dispatch)",
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_82768360",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 218739
+      }
+    },
+    {
+      "name": "sub_82D928F0",
+      "status": "confirmed",
+      "category": "spawn",
+      "address_1_0": "0x82d928f0",
+      "address_tu_name": null,
+      "summary": "A generic 2-candidate priority scorer, found by tracing sub_82768360's live-captured caller_lr. Fixed 2-iteration loop (r30=2, decrementing) walking slots at r29+20/+24 (r29 = this function's own r3 param), doing what looks like an insertion-sort of 2 candidates by a packed priority value (extracted via `rlwinm r9,r9,25,7,31` from each candidate's +8 field) into a small local buffer. After the loop, reads `r3=*(r29+8)`, then `r11=*(r3+0)` (vtable ptr), `r10=*(r11+4)` (vtable slot 1), and calls through it (`bctrl`) - this indirect call is what resolves to sub_82768360 at runtime for skater-family objects. Address is in a completely different region (0x82D9xxxx) from the skater-family cluster (0x8276-0x8279), consistent with this being a shared/generic system, not skater-specific code.",
+      "calling_convention": null,
+      "call_kind": "direct-only, single known caller: sub_82D91558 (see separate entry) - the bctrl described above is sub_82768360's INBOUND call kind, not this function's own.",
+      "decompiled": null,
+      "evidence": [
+        "Live capture: sub_82768360's caller_lr = 0x82D92A14, traced via generated/skate3_recomp.91.cpp:42334-42502 (2026-08-05)."
+      ],
+      "next_step": "Trace sub_82D91558's own caller - likely the actual per-frame/per-candidate world-tick driver. sub_82D91558 already shows strong 'real manager' signals (RtlEnterCriticalSection lock, per-candidate setup loop) - see that entry."
+    },
+    {
+      "name": "sub_82D91558",
+      "status": "lead",
+      "category": "spawn",
+      "address_1_0": "0x82d91558",
+      "address_tu_name": null,
+      "summary": "Only known caller of sub_82D928F0. Strong 'real manager' signals: takes a critical section lock via the genuine Win32/Xbox kernel API __imp__RtlEnterCriticalSection before doing per-candidate work, has its own 2-iteration setup loop (bit-manipulation on candidate slot flags/counters) before that, and calls into sub_82D93BB8 (unexplored) prior to reaching sub_82D928F0 further down. Address region (0x82D9xxxx) is a dedicated, separate module from the skater-family cluster - consistent with a shared/generic scene or entity-scheduling system serving multiple entity categories, of which skater LOD gating (via sub_82768360's virtual slot) is just one polymorphic outcome.",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_82D91558",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 460072
+      },
+      "evidence": [
+        "Static read, generated/skate3_recomp.91.cpp:39463-39898+ (2026-08-05), traced from sub_82D928F0's single known caller."
+      ],
+      "next_step": "closed - caller found, see sub_827066C8."
+    },
+    {
+      "name": "sub_827066C8",
+      "status": "confirmed",
+      "category": "spawn",
+      "address_1_0": "0x827066c8",
+      "address_tu_name": null,
+      "summary": "Only known caller of sub_82D91558 (2 call sites, r3=2 and r3=1 respectively - two priority-tier passes per tick). Reads unmistakably like a PER-TICK WORLD-CANDIDATE PROCESSING DRIVER: gated by a global enable flag + a per-object state byte at self+45 (skip entirely if already running/disabled); each pass first does its own indirect/virtual dispatch call (bctrl through a per-object vtable) before feeding results into sub_82D91558; ends in a classic double-buffered commit pattern - compares state bytes at self+44 vs self+45, and only if they differ takes a REAL critical section lock (__imp__RtlEnterCriticalSection/RtlLeaveCriticalSection) and calls sub_82B6B108 (unexplored) to finalize. This is the most complete, coherent candidate yet for 'the thing that drives skater population', though it may turn out to only control WHICH EXISTING skater objects get their presentation rendered (LOD-driven), not create new skater game-logic objects - see population_vs_presentation_open_question.",
+      "calling_convention": null,
+      "call_kind": "direct-only, single known caller not yet found",
+      "decompiled": null,
+      "evidence": [
+        "Static read, generated/skate3_recomp.30.cpp:61677-61905 (2026-08-05), traced from sub_82D91558's only known caller."
+      ],
+      "next_step": "Two open threads: (1) find THIS function's own caller (the literal per-frame tick entry point). (2) read sub_82B6B108 (the critical-section-protected finalize call) and the two indirect vtable dispatch targets this function calls before each sub_82D91558 pass."
+    },
+    {
+      "name": "sub_827843F0",
+      "status": "lead",
+      "category": "skater",
+      "address_1_0": "0x827843f0",
+      "address_tu_name": null,
+      "summary": "Stage dispatcher: r6=1 -> sub_82768360 (lazy presentation create), r6=2 -> sub_82769478 (config blend/transition, see below - NOT a despawn counterpart, that hypothesis did not pan out). Classic LOD/streaming-stage switch shape. Body itself is a pure adjustor-thunk-and-tailcall: `addi r3,r3,28` then a plain `b` (tail call, not `bl`) to whichever stage function - i.e. this function ONLY exists to add 28 to its incoming `this` pointer before forwarding.",
+      "calling_convention": null,
+      "call_kind": "unknown, but with a stronger-than-usual structural signal this time: an adjustor thunk (this+=28, then tail-call) is a standard C++-ABI pattern for a multiple-inheritance/interface vtable slot, which by construction is called only through that vtable (never a direct `bl`). Re-confirmed zero direct call sites this session too. Per meta.vtable_data_visibility, the vtable itself is not visible in this repo's text (no rodata/vtable reconstruction), so this can't be fully proven from source alone - treat as 'likely virtual, can't confirm further without a real disassembler', not as certain.",
+      "decompiled": null,
+      "next_step": "What supplies r6 (1 vs 2) and who holds the vtable containing this thunk's slot remain unanswered."
+    },
+    {
+      "name": "sub_82769478",
+      "status": "lead",
+      "category": "skater",
+      "address_1_0": "0x82769478",
+      "address_tu_name": null,
+      "summary": "Stage-2 sibling of sub_82768360, reached via sub_827843F0 r6=2. Fully read (~190 lines). NOT a despawn/eviction function (that hypothesis from the earlier research pass did not pan out) - it does the same two gate checks (sub_827FBC28/sub_827FBAA0) then a THIRD check (sub_8277ADC0 against a fixed-table value at a constant address +32160), then picks one of two candidate config-variant pointers (r30 or r29, resolved via the same tagged-pointer table-walk pattern seen in sub_82768360), clones the chosen one into a live buffer via sub_82768F80, sets a transition flag byte (self+2020) and a timer float (self+2456), and blends via two calls to sub_82AC5010. Reads like 'swap the active detail/quality-tier config with a blend/transition when settings change', not a spawn/despawn operation.",
+      "calling_convention": null,
+      "call_kind": "unknown, same vtable-thunk caveat as sub_827843F0 (this is one of its two dispatch targets).",
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_82769478",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 218766
+      },
+      "evidence": [
+        "generated/skate3_recomp.34.cpp:12603-12790"
+      ]
+    },
+    {
+      "name": "sub_82768F80",
+      "status": "lead",
+      "category": "skater",
+      "address_1_0": "0x82768f80",
+      "address_tu_name": null,
+      "summary": "Plain struct-clone helper: copies a ~200-byte 'detail/LOD settings' struct from r4 (src) to r3 (dst) via vector loads/stores, then merges several bitfields at +188/+192. Called from both sub_82768360's array-building loop and sub_82769478's config-swap - a shared 'copy this detail-config variant' utility, not itself population- or spawn-related.",
+      "calling_convention": null,
+      "call_kind": "direct-only (both known callers use literal `sub_82768F80(ctx, base)` calls).",
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_82768F80",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 218748
+      },
+      "evidence": [
+        "generated/skate3_recomp.34.cpp:11846-12026"
+      ]
+    },
+    {
+      "name": "skater_gate_functions_sub_827FBC28_sub_827FBAA0",
+      "status": "lead",
+      "category": "skater",
+      "address_1_0": "0x827fbc28",
+      "address_tu_name": null,
+      "summary": "The two gate checks that must both pass before sub_82768360/sub_82769478 proceed. Fully read (generated/skate3_recomp.39.cpp:47750-48049+). Both are almost entirely virtual-dispatch (bctrl-through-vtable) chains: they fetch a component off the passed-in object (self+192 controls a fast path via self+40's vtable, or a slow path through a fixed global at a constant address, offset +28, then +0, then +11264 into an 11KB+ singleton struct), then make 2-3 more virtual calls, and end by comparing a returned int against the literal enum values 2 and 5 (`cmpwi cr6,r3,2` / `cmpwi cr6,r3,5`). Reads like a generic 'is this world/streaming-state component in state kLoaded/kReady (or similar)' check via a virtual interface - the kind of gate you'd expect for level-streaming/asset-readiness, not anything multiplayer-specific.",
+      "calling_convention": null,
+      "call_kind": "direct-only from both sub_82768360 and sub_82769478 (both are literal `bl` call sites).",
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_827FBC28",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 237032
+      },
+      "additional_addresses": [
+        {
+          "address": "0x827fbaa0",
+          "decompiled": {
+            "raw_name": "Function_827FBAA0",
+            "return_type": "void",
+            "params_raw": "void",
+            "param_count": 0,
+            "export_line": 237023
+          }
+        }
+      ]
+    },
+    {
+      "name": "cLivingWorldPresEntity_Update",
+      "status": "confirmed",
+      "category": "livingworld",
+      "address_1_0": "0x8279dae0",
+      "address_tu_name": "sub_827C1188",
+      "summary": "Per-entity-per-tick update; computes the spawn fade-in ramp and writes opacity. Proven active (native_lw.cpp's store populates from its exit hook).",
+      "calling_convention": "r3 = entity (LivingWorld pres entity)",
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_8279DAE0",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 224804
+      }
+    },
+    {
+      "name": "sub_8279E648",
+      "status": "lead",
+      "category": "livingworld",
+      "address_1_0": "0x8279e648",
+      "address_tu_name": null,
+      "summary": "Thin tail-call wrapper (`b`, not `bl`) straight to cLivingWorldPresEntity::Update. No direct call site found anywhere.",
+      "calling_convention": null,
+      "call_kind": "unknown - live-probed, ZERO events observed. Given cLivingWorldPresEntity::Update itself is proven to run constantly (via its own separate compile-time hook), this wrapper is either dead/unused code or reached through a call path this session's tooling still can't see.",
+      "decompiled": null
+    },
+    {
+      "name": "sub_82797F50",
+      "status": "confirmed",
+      "category": "livingworld",
+      "address_1_0": "0x82797f50",
+      "address_tu_name": null,
+      "summary": "The LivingWorld/pedestrian creation factory. Signature: (param_1=self/world, param_2=descriptor ptr). Dispatches on `*param_2` (values 2-5) to one of four sub-constructors (Function_82798A68/Function_82798D98/Function_82798EB0/Function_82798360), calls a vtable method on the result (slot +0x54), does some setup (Function_82D34778), then calls `AddEntityToRenderViews(param_1, entity, 0)` - r5=0, the single-registration path, same as every skater sample we've captured live. Same overall shape as sub_82808E38 (type-dispatch factory -> AddEntityToRenderViews) but for LivingWorld instead of skaters, and simpler (no slot-array/occupied-flag bookkeeping visible here) - this one doesn't look like the population-cap owner, more like a generic 'construct entity by type code' utility mirrored across categories.",
+      "calling_convention": null,
+      "call_kind": "direct-only. XREF search came back empty in this pass (same as several others) - caller still unknown.",
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_82797F50",
+        "return_type": "int *",
+        "params_raw": "longlong param_1,char *param_2",
+        "param_count": 2,
+        "export_line": 224355
+      },
+      "evidence": [
+        "Ghidra decompiler, retail 1.0 XEX, 2026-08-04 (via docs/sk3o/ghidra_scripts/sk3o_dump.py). Confirms observed_added_by_livingworld's 0x82798008 exactly (call site + 4 = return address)."
+      ]
+    },
+    {
+      "name": "Function_82765EC0_seven_slot_table_MAJOR_FINDING",
+      "status": "confirmed",
+      "category": "spawn",
+      "address_1_0": "0x82765ec0",
+      "address_tu_name": null,
+      "summary": "STRONGEST POPULATION-CAP CANDIDATE FOUND TO DATE. Full decompile recovered after fixing the missing 0x82F274B4 no-return-helper flag (was truncating this function - see ghidra_noreturn_truncation_gotcha). Body: gets the world-singleton base via FUN_82f274b4() (matches DAT_83027da0 - the field range it touches, +0x730 through +0x7a48, is the exact byte-offset range UndefinedFunction_827797f0/the world constructor zero-initializes at dword indices 0x1cc-0x1d7, confirming this is the same object), then walks a FIXED ARRAY OF EXACTLY 7 SLOTS at world+0x730 (one pointer each). For each occupied slot, checks two possible identity keys (either *(int*)(entity+0xc)+0x38 matching param_4, or entity+0x788 matching param_2); on a match: calls RmvEntityFrmRenderViews(world, entity, 0) (confirmed despawn), decrements a refcount, calls the entity destructor via vtable slot 0 if refcount hits zero, then zeroes the slot. A param_2==0 special-case additionally resets several world-singleton bookkeeping fields (+0x7a45 to 1, +0x7a48 to 0, a 25-byte block at (+0x7a2c)+0xa40 cleared) - looks like a full-table reset/teardown variant, not just single-entry removal.",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_82765EC0",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 218639
+      },
+      "evidence": [
+        "docs/sk3o/ghidra_dump.txt, 2026-08-05, generated via updated sk3o_dump.py (added 0x82f274b4 to NORETURN_FIX_ADDRS).",
+        "Two known callers fully read: Function_827079F8 (0x827079F8, removes by param_2+0x18/+0x10 keys, flag=1, then notifies a callback at param_2+0x20 if present) and Function_82707A78 (0x82707A78, param_2=0 - the reset-all variant)."
+      ],
+      "next_step": "Ghidra XREF for this function also found 2 more callers INSIDE sub_82768360 and sub_82769478 (call sites 0x82768234 and 0x82769204) - both addresses are LOWER than those functions nominal start addresses (0x82768360/0x82769478), meaning both functions true entry points are earlier than previously read (same savegprlr-preamble boundary pattern seen repeatedly this session) and there is unread code in both functions that directly interacts with this slot table. Next: find and read the real entry points (~0x827681xx-0x82768360 and ~0x82769000-0x82769478 ranges) to see the ADD/claim side of this table (this function only shows the REMOVE side) - that add/claim logic is the actual spawn trigger. Also check XREF caller 0x82765e44 (very close to this function, unread) for a possible sibling insert function."
+    },
+    {
+      "name": "sub_827079D8_resource_key_thunk_found",
+      "status": "confirmed",
+      "category": "spawn",
+      "address_1_0": "0x827079d8",
+      "address_tu_name": null,
+      "summary": "Found the missing link between sub_82B6B190's candidate-array bctrl dispatch and sub_827649A0. sub_827079D8 is a small, real (non-inlined) function: r11=r4 (save candidate ptr); r4=*(uint64*)(r4+16) (CANDIDATE+16 -> becomes sub_827649A0's resource_key); r5=*(uint64*)(r11+24) (CANDIDATE+24 -> becomes sub_827649A0's candidate_id); r3 = a fixed global lookup that always resolves to the manager (0x495640C0); then `b sub_827649A0` (plain tail call, confirmed via generated/skate3_recomp.30.cpp:64425 - no ctx.lr= line before the call, meaning the compiled `b` instruction, not `bl`). This resolves the earlier mystery of why resource_key (e.g. 0x2B805BAF) reads as unreadable memory despite candidate being a real pointer - resource_key is a VALUE stored inside the candidate struct at +16, not the candidate pointer itself.",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": null,
+      "evidence": [
+        "generated/skate3_recomp.30.cpp:64409-64428, DEFINE_REX_FUNC(sub_827079D8), read directly 2026-08-05.",
+        "Confirmed via grep for 'sub_827649A0(ctx, base)' across generated/*.cpp - this was the only call site NOT preceded by a ctx.lr= assignment, i.e. the only genuine tail call (bl call sites were sub_82B6B190's bctrl-through-vtable, invisible to this text search, and this thunk)."
+      ],
+      "next_step": "(1) User to rebuild, spawn_trace on, spawn_trace_unmute sub_827079D8, and entity_dump the r4 (candidate pointer) reported when it fires - this finally shows a real candidate struct's full field layout (model/position/is-player flags the user asked about), not just the +16/+24 fields inferred from disassembly. (2) Build the same-tick fresh-clone spawn mechanism once the full struct layout is understood, extending sk3o_spawn_control.cpp's PumpPendingManualSpawn-style pattern but triggered from the new sub_827079D8 hook instead of sub_82768360, using its own live r4-derived resource_key/candidate_id immediately rather than a stale replayed value."
+    },
+    {
+      "name": "sub_827681D0_real_body_read_row_struct_gated_2026_08_05",
+      "status": "confirmed",
+      "category": "spawn",
+      "address_1_0": "0x827681d0",
+      "address_tu_name": null,
+      "summary": "METHODOLOGY VALIDATION: rather than relying on Ghidra's decompile (which is broken for this function - see hard_4_slot_skater_cap_found_2026_08_05), read the RECOMPILER's own complete, ground-truth PPC->C++ translation directly (generated/skate3_recomp.34.cpp:9893, DEFINE_REX_FUNC(sub_827681D0), ~230 lines). This is the same instruction-level translation that actually runs at retail - unlike Ghidra's decompile, it cannot be 'wrong', only tedious to read by hand. Immediately yielded new ground truth live tracing alone could not: sub_827681D0 is NOT itself a 4-iteration loop - it processes ONE row per call (r4/r29 is a row-struct pointer, matching the 4 fixed addresses 0x8308D5B0/D680/D750/D820 observed live). Per call it: (1) reads a resource descriptor at row+160 and a 4-bit flags nibble at row+188 (rlwinm r11,28,28,31 extracting bits 28-31); (2) calls sub_8276A998(manager+1268, row+160_descriptor, flags_nibble) - a lookup, likely 'find/validate the loaded asset for this descriptor'; (3) if that returns non-null AND passes readiness checks on its +148/+152/+152->+4 fields, calls sub_828837B0(r3=2592, r4=[a table load], r5=[rdata+24604]) - a second readiness/allocation check; (4) ONLY if both succeed, calls sub_8275D900(r3=manager-or-0, r4=290 /*0x122, skater type, matches known constant*/, r5=orig_r6, r6=row+160_descriptor, r7=orig_r7, r8=lookup_result, r9=is_fresh_flag, r10=row+160_descriptor) at caller_lr=0x827682EC - matching every live-observed construct call exactly. Also confirmed: on mismatch (row's occupant doesn't match row+160's target, checked via a 64-bit compare of [occupant+1928] vs [row+160]) it calls sub_82765EC0 to evict BEFORE the above gate - explaining why our manual sub_827649A0 calls always evicted (whatever they touched) but the construct step, gated entirely by THIS function's own row-struct read and asset-readiness lookup, never fired for values we invented outside the row struct.",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_827681D0",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 218730
+      },
+      "evidence": [
+        "generated/skate3_recomp.34.cpp:9893-10121, full DEFINE_REX_FUNC(sub_827681D0) body read directly.",
+        "sub_8275D900 call site at generated/skate3_recomp.34.cpp:10047-10049 sets ctx.lr = 0x827682EC before calling - exact match to every live-captured sub_8275D900 caller_lr this session."
+      ],
+      "next_step": "Read the function containing caller_lr=0x82768880 in generated/skate3_recomp.34.cpp the same way (direct source read, not Ghidra) to (a) confirm whether the loop bound of 4 is a true compile-time constant or reads a runtime array-size field that could be larger elsewhere, and (b) find where row+160/row+188 actually get written, which is the real lever for driving construction rather than sub_827649A0's arguments directly. This validates the user's proposed approach (read the recompiler's real translated code, same methodology as the graphics-side hand-written reimplementations in skate3_native_scene*.cpp, then potentially write a hand-crafted REX_FUNC override) is viable and already paying off - recommend continuing this reading thread before writing any new override code."
+    },
+    {
+      "name": "manager_population_count_write_site_found_2026_08_05",
+      "status": "confirmed",
+      "category": "spawn",
+      "address_1_0": "0x82768360",
+      "address_tu_name": null,
+      "summary": "The watch_write hardware-breakpoint tool (watch_write_tool_rebuilt_hardware_breakpoints_2026_08_05) finally caught a live write to manager+1264, resolved via DbgHelp SymFromAddr/SymGetLineFromAddr64 to __imp__sub_82768360+0x385 (generated/skate3_recomp.34.cpp:10211-10213) - inside the ORIGINAL, un-hooked body of sub_82768360, a function traced and MUTED as 'boring per-frame noise' for the entire session. The exact instruction sequence (read directly from the recompiled source): ctx_ptr=[r4+0]; flag=([r4+48]&1); selected=flag?[ctx_ptr+8]:[ctx_ptr+0]; aligned=(selected+3)&~3; value=[aligned+0]; manager[+1264]=value. This is a WHOLESALE COPY every single frame from a field inside sub_82768360's own r4 (second parameter/context object), NOT an incremental allocator or freelist-based growth - fully explaining why every static search for 'the allocator' (candidate_source_is_generic_hashtable_registry_2026_08_05, the manager+1264/+1316 offset hunt, the upstream hashtable registry) came up empty: there is no per-candidate insert function to find. The count is simply re-synced from external context data every frame, matching every observation this session (per-area count: 1 with no AI nearby, 4 with 3 AI present).",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_82768360",
+        "return_type": "void",
+        "params_raw": "void",
+        "param_count": 0,
+        "export_line": 218739
+      },
+      "evidence": [
+        "Live watch_write 495645B0 4 1 60 (manager+1264) hit resolved via DbgHelp to __imp__sub_82768360+0x385 (generated/skate3_recomp.34.cpp:10211).",
+        "generated/skate3_recomp.34.cpp:10123-10213 read directly, confirming the full pointer-chase computation matches the captured hit exactly."
+      ],
+      "next_step": "Test the new sk3o_inflate_candidate_count hook."
+    },
+    {
+      "name": "GameModule_GameLoad_confirmed_2026_08_06",
+      "status": "confirmed",
+      "category": "world",
+      "address_1_0": "0x826bae50",
+      "address_tu_name": null,
+      "summary": "Sk8::GameModule::GameLoad (sub_826BAE50) - the real 'begin loading the game/world' entry point, found via a live Ghidra RTTI/string-search session (a broad string search for \"start\" surfaced the debug marker string \"GameModule::GameLoad START\" at 0x821d65c4; its sole XREF was this function). This is a genuinely different discovery method than everything else this session (structural guessing from call shape, e.g. sub_82771D28/sub_82783400, both ruled out) - found via a literal debug string printed inside the real function, then confirmed live.",
+      "calling_convention": null,
+      "call_kind": null,
+      "decompiled": {
+        "source": "ghidra_export",
+        "raw_name": "Function_826BAE50",
+        "return_type": "void",
+        "params_raw": "int param_1",
+        "param_count": 1,
+        "export_line": 183595
+      },
+      "evidence": "Live-hooked (skate3_native_render.cpp, OnTracedCall) alongside its one-shot worker sub_826BAA20. spawn_trace_only + spawn_trace on, tested during a real boot-to-gameplay session: both fired EXACTLY ONCE, at the moment gameplay started loading, with matching r3=0x40143560 (the GameModule instance pointer) and r4=1/r5=0/r6=0 on both. User-confirmed: 'Yes in the moment i start loading in game.'",
+      "next_step": "(1) Test whether this fires again on a pause-menu teleport - if not, teleport uses a different mechanism entirely and this only covers the Join-button 'boot to gameplay' case, still valuable on its own. (2) To actually CALL this ourselves (the real goal - bypass synthetic input entirely), need to find/construct a valid GameModule instance (r3=0x40143560 pattern - is there always exactly one, reachable via a known global?) and understand what configures WHICH level/map it loads (likely fields on the GameModule object itself, set before GameLoad is called - not visible from GameLoad's own body, which takes no map/level parameter). (3) Read sub_826BAA20's body fully (only the first ~90 lines read so far) and its three direct callees (sub_82AC52F8, sub_824E7D80, sub_82C78CB0) for the map-selection parameter shape."
+    }
+  ],
+  "fields": [
+    {
+      "name": "skater_vtable_base_and_type_id",
+      "status": "confirmed",
+      "category": "skater",
+      "offset": 0,
+      "summary": "MAJOR FINDING via the new `entity_dump` console command (live raw memory dump of an entity, sk3o_skater.cpp) on the local player's skater entity (0x491B2AE0 that session): entity+0x0 = 0x8230B478, the entity's own real vtable pointer, read directly from a live instance - NOT a guessed slot address like every prior vtable attempt this session. Cross-checked against the earlier wide vtable_scan.py dump: SkaterPresEntity::BindConstants (0x82760950) sits at 0x8230b4c0, i.e. exactly (0x8230b4c0-0x8230B478)/4 = slot #18 from this base - consistent and confirms this really is the SkaterPresEntity (or immediate base class) vtable. SECOND finding same dump: entity+0x8 = 0x00000122 = 290 decimal, the EXACT type constant sub_827681D0 passes to Function_8275D900 when constructing a skater - the entity carries its own type ID inline, directly confirming the resource-key/type-descriptor factory architecture already inferred from sub_82808E30/Function_8275D900.",
+      "evidence": [
+        "Live entity_dump 0x491B2AE0 (2026-08-05), cross-referenced against docs/sk3o/ghidra_vtable_scan.txt's slot list from 2026-08-05 earlier in the session."
+      ]
+    },
+    {
+      "name": "ENT_WORLD_MATRIX_TRANS",
+      "status": "confirmed",
+      "category": "entity",
+      "offset": 416,
+      "summary": "m_MatLtoWTrans - entity's live world transform (4 vec4 rows); translation is component [3] of rows 0-2.",
+      "used_by": [
+        "sk3o_skater.cpp GetLocalSkaterState",
+        "native_entity.cpp ReadEntityWorldPosition"
+      ],
+      "evidence": [
+        "Verified bit-exact against GPU-bound constants (native_entity ObserveRopaWorld tripwire, zero divergence in production)."
+      ]
+    },
+    {
+      "name": "ENT_OPACITY_SKATER",
+      "status": "confirmed",
+      "category": "entity",
+      "offset": 496,
+      "summary": "Skater-family entity opacity Vector4, x = alpha.",
+      "evidence": [
+        "SkaterPresEntity::BindConstants push, hash 0xD5DF94E7."
+      ]
+    },
+    {
+      "name": "ENT_OPACITY_LIVINGWORLD",
+      "status": "confirmed",
+      "category": "entity",
+      "offset": 528,
+      "summary": "LivingWorld-family entity opacity Vector4, x = alpha; also carries a 0-1 spawn fade-in ramp at +576 and an 'is fading' byte at +580.",
+      "evidence": [
+        "cLivingWorldPresEntity::Update (sub_8279DAE0) writes min(ramp, distance-term) here every tick."
+      ]
+    },
+    {
+      "name": "entity_plus_0xC_is_slot_companion_ptr_and_resource_key_not_pointer",
+      "status": "confirmed",
+      "category": "skater",
+      "offset": 12,
+      "summary": "Two confirmations from a live entity_dump session, 2026-08-05. (1) entity_dump 0x2B805BAF (one of the observed sub_827649A0 'resource_key' r4 values) came back fully UNREADABLE across 40 words - confirms resource_key is a hash/lookup key, NOT a raw heap pointer, ruling out the theory that sub_827649A0's r4 is literally the candidate struct pointer. (2) entity_dump 0x491B1100 (a live skater entity) shows entity+0x0=0x8230B478 (confirmed skater vtable, matches skater_vtable_base_and_type_id), entity+0x8=0x00000122 (290, confirmed skater type constant), and entity+0xC=0x405DDAE0 - which is the EXACT SAME address captured as r8 in sub_8275D900's slot-0 construction calls (see LIVE_CAPTURE_full_skater_spawn_chain_confirmed_2026_08_05). Confirms the per-slot 'companion object' pointer sub_8275D900 receives as r8 gets stored back into the constructed entity at offset +0xC - a real, useful structural anchor (not yet named/understood beyond 'the r8 companion').",
+      "evidence": [
+        "Live entity_dump 2B805BAF 40 (all unreadable) and entity_dump 0x491B1100 40 (readable, full dump), pasted by the user 2026-08-05."
+      ]
+    }
+  ]
+}

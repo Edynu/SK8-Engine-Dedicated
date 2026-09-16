@@ -766,6 +766,25 @@ add_custom_target(skate3_stage_resources
 add_dependencies(skate3_dedicated skate3_stage_resources)
 add_dependencies(skate3 skate3_stage_resources)
 
+# Stage the bundled online save profile.
+#
+# InstallOnlineSaveProfile (skate3_app_common.cpp) seeds saves_online/<xuid>/
+# from this folder the first time a player launches an online session, so the
+# session starts from a complete profile instead of the player's own career.
+# It is a TEMPLATE and is only ever read: the seeded copy is what the game
+# writes to, which is what lets clothing changes stick.
+#
+# copy_directory_if_different, not copy_directory: this holds a 2.6MB save and
+# a header that change approximately never, and rewriting them every build is
+# both pointless and a file-lock risk while the game is running.
+add_custom_target(skate3_stage_save_template
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/save_template"
+        "$<TARGET_FILE_DIR:skate3>/save_template"
+    VERBATIM
+)
+add_dependencies(skate3 skate3_stage_save_template)
+
 # Stage the F7 dev console's own frontend page (served by the client's admin
 # HTTP server - see skate3_lua_client_natives.cpp's Initialize, web_console_dir)
 # plus the built React dashboard (Console/Active Players/Scripts), served at
