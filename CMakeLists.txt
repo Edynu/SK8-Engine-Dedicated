@@ -492,6 +492,11 @@ set(SKATE3_COMMON_SOURCES
     third_party/rexglue-sdk/thirdparty/crypto/sha256.cpp
 )
 
+add_executable(skate3_stfs_dump EXCLUDE_FROM_ALL
+    tools/stfs_dump/native_main.cpp)
+target_compile_features(skate3_stfs_dump PRIVATE cxx_std_23)
+target_link_libraries(skate3_stfs_dump PRIVATE rex::filesystem rex::core)
+
 add_executable(skate3_ui_asset_bootstrap EXCLUDE_FROM_ALL
     tools/skate3_ui_extract/native_main.cpp
     src/skate3_vanilla_ui/skate3_ui_asset_cache.cpp)
@@ -849,7 +854,13 @@ if(SKATE3_ENABLE_CEF)
             "${SKATE3_CEF_SDK_ROOT}/Release/vk_swiftshader_icd.json"
             "${SKATE3_CEF_SDK_ROOT}/Release/vulkan-1.dll"
             "$<TARGET_FILE_DIR:skate3>"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        # copy_directory_if_different, not copy_directory: the plain form
+        # rewrites all 220 locale files every build, and each one is locked
+        # while the game is running. Since this target is a dependency of
+        # skate3, that made every build started with the game open fail here -
+        # and fail in a way that looks nothing like "close the game", because
+        # the reported error is a file copy deep in CEF staging.
+        COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
             "${SKATE3_CEF_SDK_ROOT}/Resources/locales"
             "$<TARGET_FILE_DIR:skate3>/locales"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

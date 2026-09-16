@@ -231,33 +231,44 @@ end)
 
 -- ---------------------------------------------------------------- commands
 
--- Markers lives in its own resource and therefore its own lua_State, so
--- these go through exports rather than being called as globals.
+-- The NATIVE markers, not the Markers resource.
+--
+-- This used exports.Markers, which drew its own approximation of a marker and
+-- lived in a separate lua_State. Two consequences, both gone now: export
+-- arguments are marshalled as JSON so a callback could not be passed at all
+-- (it arrived as nil), and activation had to come back as a broadcast
+-- `markers:activated` event that every marker in every resource also saw, so
+-- this had to filter by handle to recognise its own.
+--
+-- CreateMarker is a resource native running in THIS state, so onUse is just a
+-- closure: it can see `joined()` directly, it cannot be confused with another
+-- resource's marker, and it may yield (markers run their callback as a
+-- scheduler thread). It also draws retail's own extracted icon rather than an
+-- imitation of one.
 function ensureLobbyMarker(x, y, z)
     if lobbyMarker then
-        exports.Markers:RemoveMarker(lobbyMarker)
+        DestroyMarker(lobbyMarker)
     end
-    -- NO callback argument: Markers lives in another lua_State, and export
-    -- arguments are marshalled as JSON, which cannot carry a function - it
-    -- arrived there as nil and failed with "attempt to call a nil value".
-    -- Activation comes back as the `markers:activated` event below.
-    lobbyMarker = exports.Markers:CreateMarker(
-        'signup', x, y, z, 'Game of S.K.A.T.E.')
+    lobbyMarker = CreateMarker({
+        x = x, y = y, z = z,
+        -- radius is the ACTIVATION distance, size is how big the icon draws.
+        -- Generous radius: the lobby marker sits in the middle of the play
+        -- area and players roll past it rather than parking on it.
+        radius = 4.0,
+        size = 1.5,
+        texture = 'challenge_1',
+        color = 0xFFFFFFFF,
+        hold = 500,
+        text = 'Game of S.K.A.T.E.',
+        onUse = function()
+            if joined() then
+                print('[skate] you are already in')
+                return
+            end
+            TriggerServerEvent('skategame:join', { name = GetPlayerName(0) })
+        end,
+    })
 end
-
--- A LOCAL event (TriggerEvent from Markers reaches every resource), so
--- AddEventHandler is right here - unlike the server broadcasts above, which
--- need RegisterNetEvent.
-AddEventHandler('markers:activated', function(id)
-    if id ~= lobbyMarker then
-        return  -- someone else's marker
-    end
-    if joined() then
-        print('[skate] you are already in')
-        return
-    end
-    TriggerServerEvent('skategame:join', { name = GetPlayerName(0) })
-end)
 
 -- The marker is owned by the BROADCAST STATE, not by whoever ran
 -- `skategame`.
@@ -288,7 +299,7 @@ function syncLobbyMarker()
         ensureLobbyMarker(area.x, area.y, area.z)
         lobbyMarkerAt = { x = area.x, y = area.y, z = area.z }
     elseif lobbyMarker then
-        exports.Markers:RemoveMarker(lobbyMarker)
+        DestroyMarker(lobbyMarker)
         lobbyMarker = nil
         lobbyMarkerAt = nil
     end
@@ -320,8 +331,9 @@ end)
 RegisterCommand('skateleave', function()
     TriggerServerEvent('skategame:leave')
     if lobbyMarker then
-        exports.Markers:RemoveMarker(lobbyMarker)
+        DestroyMarker(lobbyMarker)
         lobbyMarker = nil
+        lobbyMarkerAt = nil
     end
     state = nil
     hideUi()

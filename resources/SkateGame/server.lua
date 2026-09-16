@@ -187,7 +187,20 @@ local function advanceMatch()
             broadcast()
             return
         end
-        beginSet(nextSetter(state.setter))
+        -- THE SETTER KEEPS THE SET. This used to rotate on every completed
+        -- round, which meant landing your set handed the next one away - so
+        -- setting well was punished and the set travelled round the table
+        -- regardless of who could actually skate.
+        --
+        -- Real S.K.A.T.E.: you keep calling tricks for as long as you keep
+        -- landing them, and the set only moves when YOU miss your own. Those
+        -- paths already rotate (a wrong trick, a pass, or the clock running
+        -- out during a set all call nextSetter), so the rule lives in exactly
+        -- one place per outcome rather than being split across both.
+        --
+        -- It follows that a player on a run can spell out an opponent without
+        -- ever giving up the set, which is the point of the game.
+        beginSet(state.setter)
         return
     end
     state.attempting = state.pending[1]
@@ -278,7 +291,11 @@ RegisterNetEvent('skategame:leave', function()
         if wasAttempting then
             state.attempting = state.pending[1]
             if state.attempting == nil then
-                beginSet(nextSetter(state.setter))
+                -- The last player owing an answer left. The round is over
+                -- without the setter having missed anything, so the set stays
+                -- with them - same reason as advanceMatch. Rotating here would
+                -- let someone take the set off a player simply by quitting.
+                beginSet(state.setter)
             else
                 state.deadline =
                     Skate.GetGameTimer() + SkateGame.MATCH_SECONDS * 1000

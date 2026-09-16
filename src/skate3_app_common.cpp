@@ -635,6 +635,11 @@ void OpenFolderInFileManager(const std::filesystem::path &path) {
 }
 constexpr std::string_view kDlcDirectoryName = "dlc";
 constexpr std::string_view kSavesDirectoryName = "saves";
+// Online sessions get their own saved-game root, seeded from a bundled
+// template, so a player's single-player career is neither handed an unlocked
+// profile nor shadowed by one.
+constexpr std::string_view kOnlineSavesDirectoryName = "saves_online";
+constexpr std::string_view kSaveTemplateDirectoryName = "save_template";
 constexpr double kSixteenNineAspect = 16.0 / 9.0;
 constexpr double kUltrawideAspectEpsilon = 0.01;
 
@@ -1410,6 +1415,7 @@ void Skate3BaseApp::OnPostSetup() {
                   portable_saves.string());
     }
   }
+  InstallOnlineSaveProfile();
   InstallDlcPackages();
   InstallRecipeOverlay();
 
@@ -2022,6 +2028,87 @@ void Skate3BaseApp::LogDebugMarker() {
   DisableActiveDebugDiagnostics();
   REXLOG_WARN("USER DEBUG MARKER #{}: F9 pressed; active diagnostics disabled",
               marker);
+}
+
+// A SEPARATE saved game for online sessions, seeded from the bundled profile.
+//
+// WHY ONLINE NEEDS ITS OWN SAVE. Everyone in a session should have the same
+// wardrobe, which means online wants a fully-unlocked profile - but a player's
+// single-player career is theirs and must not be handed one, nor have its
+// progress shadowed by one. Two saves is the only arrangement that gives both.
+//
+// WHY THE DECISION CAN BE MADE HERE. The saved-game root has to be chosen
+// before the game loads a profile, so it cannot wait until the player joins a
+// server. It does not have to: the launcher sets
+// skate3_multiplayer_relay_active before anything loads, exactly as the forced
+// Free Play and unlock layers already rely on, so a launch already knows what
+// kind of session it is.
+//
+// WHY SEED RATHER THAN SHIP THE LIVE FILE. The portable folder is read-WRITE -
+// the game treats whatever is in it as the live profile and saves over it. A
+// bundled save dropped straight in is therefore destroyed the first time the
+// game writes, which is exactly what happened when one was staged by hand:
+// 1,570,977 non-zero bytes went in and 19,223 came back. So the template is
+// copied in only when the player has no online save yet, and never touched
+// again - which is also what lets them change clothes and have it stick.
+//
+// The xuid is the CURRENT PLAYER'S, never a constant: StableXuidForId hashes
+// the profile id, so every install has a different one and a baked-in path
+// would resolve on exactly one machine.
+void Skate3BaseApp::InstallOnlineSaveProfile() {
+  if (!rex::cvar::Query<bool>("skate3_multiplayer_relay_active")) {
+    return;  // offline launch - the player's own save, untouched
+  }
+  if (!runtime() || !runtime()->kernel_state() ||
+      !runtime()->kernel_state()->content_manager() ||
+      !runtime()->kernel_state()->user_profile()) {
+    return;
+  }
+
+  const auto root = rex::filesystem::GetAppRootFolder() /
+                    std::string(kOnlineSavesDirectoryName);
+  const auto template_root = rex::filesystem::GetAppRootFolder() /
+                             std::string(kSaveTemplateDirectoryName);
+
+  char xuid_text[17] = {};
+  std::snprintf(xuid_text, sizeof(xuid_text), "%016llX",
+                static_cast<unsigned long long>(
+                    runtime()->kernel_state()->user_profile()->xuid()));
+
+  std::error_code ec;
+  if (std::filesystem::is_directory(template_root, ec)) {
+    for (const auto &package :
+         std::filesystem::directory_iterator(template_root, ec)) {
+      if (!package.is_directory()) {
+        continue;
+      }
+      const auto dest =
+          root / xuid_text / package.path().filename();
+      // Seed ONLY when absent. An existing online save is the player's own
+      // clothing and progress; overwriting it with the template would throw
+      // that away every launch.
+      if (std::filesystem::exists(dest, ec)) {
+        continue;
+      }
+      std::filesystem::create_directories(dest, ec);
+      for (const auto &file :
+           std::filesystem::directory_iterator(package.path(), ec)) {
+        if (!file.is_regular_file()) {
+          continue;
+        }
+        std::filesystem::copy_file(file.path(),
+                                   dest / file.path().filename(),
+                                   std::filesystem::copy_options::none, ec);
+      }
+      REXLOG_INFO("Skate 3 online save: seeded {} from {}",
+                  dest.string(), package.path().string());
+    }
+  }
+
+  runtime()->kernel_state()->content_manager()->SetContentTypeRoot(
+      rex::system::XContentType::kSavedGame, root);
+  REXLOG_INFO("Skate 3 online save: using {} for xuid {}", root.string(),
+              xuid_text);
 }
 
 void Skate3BaseApp::ApplySelectedProfileToRuntime() {

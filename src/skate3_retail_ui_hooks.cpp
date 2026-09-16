@@ -149,6 +149,18 @@ std::atomic<bool> g_trace_cac_bindings{false};
 std::atomic<bool> g_trace_menu{false};
 std::atomic<bool> g_unlock_everything{false};
 std::atomic<bool> g_online_session{false};
+// Whether an online session forces the whole wardrobe open. OFF.
+//
+// It used to be unconditional: being online was itself the unlock, on the
+// grounds that everyone in a session should have the same wardrobe. That is
+// abandoned. Faking ownership - whether per item through OptionType or
+// wholesale through retail's progression flag - desyncs the grid the editor
+// draws from the ownership-filtered list SelectItem indexes into, so picking
+// one shirt hands you another and the item you land on has no colour
+// variants. Online unlocks are supposed to come from a genuinely complete
+// profile seeded into the online save instead, where both lists are built
+// from the same data and cannot disagree.
+std::atomic<bool> g_unlock_online_progression{false};
 
 // The ONE place that actually pays for a cvar read. Everything else in this
 // file goes through the accessors below.
@@ -163,6 +175,9 @@ void RefreshCachedFlags() {
       std::memory_order_relaxed);
   g_option_remap_mode.store(
       static_cast<int>(rex::cvar::Query<double>("skate3_cac_option_remap")),
+      std::memory_order_relaxed);
+  g_unlock_online_progression.store(
+      rex::cvar::Query<bool>("skate3_unlock_online_progression"),
       std::memory_order_relaxed);
   // EFFECTIVE, not the cvar. An online session forces the unlock
   // (UnlockForcedByOnlineSession), and for a long time only
@@ -189,8 +204,21 @@ void RefreshCachedFlags() {
       rex::cvar::Query<bool>("skate3_multiplayer_relay_active") &&
       rex::cvar::Query<bool>("skate3_online_rules");
   g_online_session.store(online, std::memory_order_relaxed);
+  // Online forces the unlock layer on, UNLESS the items are already unlocked
+  // for real.
+  //
+  // A packaged 100%-complete profile in the portable saves folder makes the
+  // whole override unnecessary, and worse than unnecessary: faking ownership
+  // makes the grid the editor DRAWS and the ownership-filtered list SelectItem
+  // resolves an index through disagree, so picking the seventh shirt lands on a
+  // different item and that item has no real colour variants. With a genuine
+  // save both lists come from the same data and cannot disagree. Clearing this
+  // is how that gets tested without also dropping out of the relay.
+  const bool force_unlock_online =
+      rex::cvar::Query<bool>("skate3_unlock_online_items");
   g_unlock_everything.store(
-      rex::cvar::Query<bool>("skate3_unlock_everything") || online,
+      rex::cvar::Query<bool>("skate3_unlock_everything") ||
+          (online && force_unlock_online),
       std::memory_order_relaxed);
 }
 
@@ -254,6 +282,28 @@ extern "C" REX_FUNC(sub_825A74A0) {
 //
 // Coverage cannot substitute for this: it only records at internal branch
 // labels, so small functions never appear in a capture at all.
+REXCVAR_DEFINE_BOOL(skate3_unlock_online_progression, false, "Skate 3",
+                    "Force retail's progression unlock-all flag on for online "
+                    "sessions. OFF: a faked unlock desyncs the item grid from "
+                    "the list SelectItem indexes into, which is why choosing "
+                    "one shirt gives you another. Online is meant to get its "
+                    "unlocks from a complete profile in the online save");
+
+REXCVAR_DEFINE_BOOL(skate3_progression_unlock_manage, true, "Skate 3",
+                    "Let the engine drive retail's progression unlock-all flag. "
+                    "Clear this to leave the flag exactly as the save loaded it "
+                    "- the flag is serialised into the profile, so enforcing it "
+                    "either way rewrites the save on the next write");
+
+REXCVAR_DEFINE_BOOL(skate3_unlock_online_items, false, "Skate 3",
+                    "Fake ownership of every Create-a-Skater item while "
+                    "online by rewriting each item's lock state. OFF by "
+                    "default: this lies to the editor per item, which desyncs "
+                    "the grid it draws from the list SelectItem indexes into - "
+                    "the cause of picking one shirt and getting another. "
+                    "Online unlocks come from retail's own progression flag "
+                    "baked into the online save instead");
+
 REXCVAR_DEFINE_BOOL(skate3_trace_cac_bindings, false, "Skate 3",
                     "Log the Create-a-Skater item database queries - item index in, "
                     "raw answer out. For finding which value carries an item's lock "
@@ -1042,11 +1092,33 @@ std::atomic<bool> g_unlock_applied{false};
 // online session before anything loads, so the flag is on from the first frame
 // and there is no window in which a menu could be drawn with padlocks on it.
 bool UnlockForcedByOnlineSession() {
-  return OnlineSessionFlag();
+  // Gated now, and off by default - see g_unlock_online_progression. Every
+  // other unlock consumer in this file routes through here, so clearing the
+  // cvar takes the whole online unlock layer out in one place rather than
+  // leaving some hooks lying and others not.
+  return OnlineSessionFlag() &&
+         g_unlock_online_progression.load(std::memory_order_relaxed);
 }
 
 void EnforceUnlockEverything(uint8_t* base) {
   if (base == nullptr) {
+    return;
+  }
+  // Leaving retail's flag strictly alone is a THIRD state, and it is needed.
+  //
+  // This function drives the flag to 1 or 0 - there was no "don't touch". That
+  // matters because the flag is not a display override: it lives in the
+  // progression manager, which the game SERIALISES. Setting it once and letting
+  // the game save bakes the unlock into the profile permanently, and turning
+  // the override back off then writes 0 and bakes the unlock straight back OUT
+  // again on the next save.
+  //
+  // So a save whose unlocks are already baked in cannot be examined while this
+  // is enforcing either way: forcing 1 tells you nothing new, and forcing 0
+  // destroys the thing you wanted to look at. Clearing this leaves whatever the
+  // save itself loaded, which is the only way to tell a genuinely unlocked
+  // profile from one that merely has the flag set.
+  if (!rex::cvar::Query<bool>("skate3_progression_unlock_manage")) {
     return;
   }
   uint32_t manager = 0;
@@ -1292,13 +1364,46 @@ extern "C" REX_FUNC(sub_825B6DC0) {
 // made remapping look unattractive.
 //
 // The filter matters: this conversion is used by every binding in the game.
-constexpr uint32_t kGameSettingsFirst = 0x825A6C00u;
-constexpr uint32_t kGameSettingsLast = 0x825A7100u;
+// The EXACT return addresses of the Game Settings accessors, not a range.
+//
+// This was a range, 0x825A6C00..0x825A7100, and that range was wrong: it also
+// contained 0x825A70CC, where CAC_OnThumbnailSelect reads the item index the
+// player clicked. So with a server menu policy active, every wardrobe click had
+// settings_skip added to it before it reached SelectItem - click the seventh
+// shirt, select the eighth. The item it landed on then had no colour variants,
+// because it was not the item whose thumbnail was drawn.
+//
+// That is the whole "choosing one shirt gives you another" bug, and it was
+// never the unlock layer it was blamed on for five sessions. It only ever
+// happened online because the policy arrives from a server resource, which is
+// exactly why offline ordering looked identical and selection still worked.
+//
+// Six addresses, derived by finding every function between 0x825A6C00 and
+// 0x825A7100 that calls this conversion and keeping only the Game Settings
+// accessors. A list cannot quietly grow to cover a neighbour the way a range
+// did; if an accessor is ever added, it has to be added here deliberately.
+constexpr uint32_t kGameSettingsArgReaders[] = {
+    0x825A6C4Cu,  // GameSettings_GetOptionTitle
+    0x825A6CFCu,  // GameSettings_GetOptionType
+    0x825A6D74u,  // GameSettings_GetOptionIntegerValue
+    0x825A6E04u,  // GameSettings_GetOptionStringValue
+    0x825A6E54u,  // GameSettings_GetOptionValueDescription
+    0x825A6EA4u,  // GameSettings_IsOptionEnabled
+};
+
+[[nodiscard]] bool IsGameSettingsArgReader(uint32_t caller) {
+  for (uint32_t address : kGameSettingsArgReaders) {
+    if (caller == address) {
+      return true;
+    }
+  }
+  return false;
+}
 
 extern "C" REX_FUNC(sub_82E5F2A8) {
   const uint32_t caller = ctx.lr;
   __imp__sub_82E5F2A8(ctx, base);
-  if (caller < kGameSettingsFirst || caller > kGameSettingsLast) {
+  if (!IsGameSettingsArgReader(caller)) {
     return;
   }
   const MenuPolicy policy = Policy();

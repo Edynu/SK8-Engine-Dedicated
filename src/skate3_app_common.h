@@ -54,6 +54,7 @@ class Skate3BaseApp : public rex::ReXApp {
   void LogUserMarker();
   void LogDebugMarker();
   void ApplySelectedProfileToRuntime();
+  void InstallOnlineSaveProfile();
 
   static bool IsRecipeNameChar(char c);
   static std::set<std::string> DiscoverRecipeAliases(
